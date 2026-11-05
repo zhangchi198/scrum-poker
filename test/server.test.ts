@@ -1,4 +1,5 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -181,5 +182,55 @@ describe('server', () => {
     expect(await res.text()).toContain('shell');
     const trav = await fetch(`${base}/..%2f..%2fetc%2fpasswd`);
     expect(await trav.text()).not.toContain('root:');
+  });
+
+  it('survives malformed request paths (regression: one request crashed the process)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'poker-static-'));
+    writeFileSync(join(dir, 'index.html'), '<html>shell</html>');
+    const { base } = await start({ staticDir: dir });
+    const port = new URL(base).port;
+    for (const path of ['/%E0%A4%A', '/%ff', '/%', '//', '///etc/passwd', '/a%00b', '/assets/../../x']) {
+      // Raw socket so the client library can't normalize the path for us.
+      const status = await new Promise<string>((ok) => {
+        const sock = connect(Number(port), '127.0.0.1', () => sock.write(`GET ${path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n`));
+        let buf = '';
+        sock.on('data', (d) => (buf += d.toString()));
+        sock.on('close', () => ok(buf.split('\r\n')[0] ?? ''));
+        sock.on('error', () => ok('socket error'));
+      });
+      expect(status, path).toMatch(/^HTTP\/1\.1 (200|400)/);
+      expect((await fetch(`${base}/healthz`)).status, `alive after ${path}`).toBe(200);
+    }
+  });
+
+  it('rejects non-object JSON bodies with 400', async () => {
+    const { base } = await start();
+    for (const body of ['null', '[]', '"x"', '5']) {
+      const res = await fetch(`${base}/api/rooms`, { method: 'POST', body });
+      expect(res.status, body).toBe(400);
+    }
+  });
+
+  it('counts slow concurrent room creations against the per-IP limit', async () => {
+    const { base } = await start({ roomsPerIpPerHour: 3 });
+    const port = Number(new URL(base).port);
+    // Open 8 requests that all pass the header phase before any body arrives.
+    const socks = await Promise.all(
+      Array.from({ length: 8 }, () => new Promise<ReturnType<typeof connect>>((ok) => {
+        const s = connect(port, '127.0.0.1', () => {
+          s.write('POST /api/rooms HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n');
+          ok(s);
+        });
+      })),
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    const statuses = await Promise.all(socks.map((s) => new Promise<string>((ok) => {
+      let buf = '';
+      s.on('data', (d) => (buf += d.toString()));
+      s.on('close', () => ok(buf.split(' ')[1] ?? ''));
+      s.write('{}');
+    })));
+    expect(statuses.filter((x) => x === '201')).toHaveLength(3);
+    expect(statuses.filter((x) => x === '429')).toHaveLength(5);
   });
 });

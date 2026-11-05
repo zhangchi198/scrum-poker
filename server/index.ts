@@ -12,6 +12,19 @@ app.server.listen(port, host, () => {
   console.log(`[poker] listening on http://${host}:${port} (static: ${staticDir}, data: ${dataFile ?? 'memory only'})`);
 });
 
+// Last resort: never die silently. Save what we can and exit non-zero so Docker restarts us.
+for (const ev of ['uncaughtException', 'unhandledRejection'] as const) {
+  process.on(ev, (err) => {
+    console.error(`[poker] ${ev}:`, err);
+    try {
+      app.save();
+    } catch {
+      /* ignore */
+    }
+    process.exit(1);
+  });
+}
+
 let closing = false;
 for (const sig of ['SIGTERM', 'SIGINT'] as const) {
   process.on(sig, async () => {
