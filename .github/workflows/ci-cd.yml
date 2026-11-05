@@ -1,0 +1,53 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Docker image builds
+        run: docker build -t scrum-poker:ci .
+
+  deploy:
+    name: Deploy to poker LXC
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    # Deploy-only self-hosted runner inside the poker LXC on the home Proxmox box.
+    runs-on: [self-hosted, poker]
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    environment:
+      name: production
+      url: https://poker.michael-zhang.com
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build and restart
+        run: docker compose up -d --build --wait --wait-timeout 60
+      - name: Smoke test
+        run: |
+          curl -fsS http://127.0.0.1:3000/healthz
+          curl -fsS http://127.0.0.1:3000/ | grep -q '<div id="root">'
+      - name: Clean up old images
+        if: always()
+        run: docker image prune -f

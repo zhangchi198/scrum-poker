@@ -1,0 +1,20 @@
+# Production stack on the poker LXC. cloudflared (systemd, on the LXC host) forwards
+# https://poker.michael-zhang.com -> http://127.0.0.1:3000, so the port is loopback-only.
+name: scrum-poker
+services:
+  app:
+    build: .
+    image: scrum-poker:latest
+    restart: unless-stopped
+    init: true # forwards SIGTERM so rooms get saved before a restart
+    stop_grace_period: 10s
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - poker-data:/data
+    logging:
+      driver: local
+      options:
+        max-size: 10m
+volumes:
+  poker-data:
