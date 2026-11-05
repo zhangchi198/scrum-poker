@@ -47,7 +47,7 @@ Internet ─▶ Cloudflare ─▶ cloudflared (systemd, LXC 102) ─▶ 127.0.0.
 - **Ingress:** Cloudflare Tunnel `scrum-poker`, config at `/etc/cloudflared/config.yml` in the LXC. No router ports are open.
 - **CI/CD:** `.github/workflows/ci-cd.yml`. The typecheck, test, build and Docker build run on GitHub-hosted runners. On a push to `main`, the `deploy` job runs on the self-hosted runner `poker-lxc` (label `poker`, user `runner`, in `/home/runner/actions-runner`). It runs `docker compose up -d --build --wait` and then a smoke test.
 - **Data:** Docker volume `scrum-poker_poker-data` holds `/data/rooms.json`. Losing it only ends the rooms that are currently open.
-- **Backups:** LXC 102 is part of the hourly PBS job and the weekly local vzdump job on the Proxmox host.
+- **Backups:** LXC 102 is in the weekly local vzdump job (Sunday 06:00) on the Proxmox host. It is deliberately left out of the hourly PBS job, which feeds the SnagDeals backup-heartbeat alert. The app is nearly stateless, so the README is enough to rebuild it.
 
 ### Ops cheatsheet
 
