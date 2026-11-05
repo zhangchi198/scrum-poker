@@ -52,9 +52,9 @@ export function Home() {
     <div className="home">
       <div className="home-hero">
         <div className="hero-cards" aria-hidden>
-          <span className="mini-card c1">3</span>
-          <span className="mini-card c2">8</span>
-          <span className="mini-card c3">5</span>
+          <span className="mini-card c1">2</span>
+          <span className="mini-card c2">5</span>
+          <span className="mini-card c3">3</span>
         </div>
         <h1>Scrum Poker</h1>
         <p className="lede">Estimate stories together in real time. Votes stay hidden until everyone reveals, so nobody anchors.</p>
