@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { extname, join, normalize, resolve } from 'node:path';
+import { extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DECK_IDS, REACTIONS, type ClientMsg, type ServerMsg } from '../shared/protocol.ts';
 import { Room, RoomError, randomId, type RoomSnapshot } from './room.ts';
@@ -215,13 +215,19 @@ export function createApp(opts: AppOptions = {}) {
     const recent = (createdByIp.get(ip) ?? []).filter((t) => now - t < 3600_000);
     if (recent.length >= roomsPerIp) return json(res, 429, { error: 'Too many rooms created. Try again later.' });
     if (rooms.size >= maxRooms) return json(res, 503, { error: 'The server is at capacity. Try again later.' });
+    // Reserve the slot before awaiting the body, so slow concurrent requests can't all pass the check.
+    recent.push(now);
+    createdByIp.set(ip, recent);
 
     let body: { deckId?: unknown; custom?: unknown } = {};
     try {
       const raw = await readBody(req);
-      body = raw ? JSON.parse(raw) : {};
+      const parsed: unknown = raw ? JSON.parse(raw) : {};
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('shape');
+      body = parsed;
     } catch {
-      return json(res, 400, { error: 'Invalid request body.' });
+      if (!res.headersSent) json(res, 400, { error: 'Invalid request body.' });
+      return;
     }
 
     let id = randomId(10);
@@ -235,8 +241,6 @@ export function createApp(opts: AppOptions = {}) {
       return json(res, 400, { error: (err as Error).message });
     }
     rooms.set(id, room);
-    recent.push(now);
-    createdByIp.set(ip, recent);
     dirty = true;
     json(res, 201, { id });
   }
@@ -245,9 +249,15 @@ export function createApp(opts: AppOptions = {}) {
 
   function serveStatic(req: IncomingMessage, res: ServerResponse) {
     if (!staticRoot) return json(res, 404, { error: 'Not found' });
-    const urlPath = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
+    let urlPath: string;
+    try {
+      urlPath = decodeURIComponent((req.url ?? '/').split('?')[0] ?? '/');
+    } catch {
+      return json(res, 400, { error: 'Bad path' });
+    }
+    if (urlPath.includes('\0')) return json(res, 400, { error: 'Bad path' });
     let file = normalize(join(staticRoot, urlPath));
-    if (!file.startsWith(staticRoot)) return json(res, 400, { error: 'Bad path' });
+    if (file !== staticRoot && !file.startsWith(staticRoot + sep)) return json(res, 400, { error: 'Bad path' });
     const isAsset = existsSync(file) && statSync(file).isFile();
     if (!isAsset) file = join(staticRoot, 'index.html'); // SPA fallback (/r/<id>, etc.)
     if (!existsSync(file)) return json(res, 404, { error: 'Not found' });
@@ -258,10 +268,22 @@ export function createApp(opts: AppOptions = {}) {
       ...SECURITY_HEADERS,
     });
     if (req.method === 'HEAD') return res.end();
-    createReadStream(file).pipe(res);
+    createReadStream(file)
+      .on('error', () => res.destroy())
+      .pipe(res);
   }
 
   const server: Server = createServer((req, res) => {
+    try {
+      route(req, res);
+    } catch (err) {
+      log(`request failed: ${(err as Error).stack}`);
+      if (!res.headersSent) json(res, 500, { error: 'Internal error' });
+      else res.destroy();
+    }
+  });
+
+  function route(req: IncomingMessage, res: ServerResponse) {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     if (path === '/healthz') return json(res, 200, { ok: true, rooms: rooms.size, connections: conns.size });
     if (path === '/api/rooms' && req.method === 'POST') {
@@ -274,7 +296,7 @@ export function createApp(opts: AppOptions = {}) {
     if (path.startsWith('/api/')) return json(res, 404, { error: 'Not found' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'Method not allowed' });
     serveStatic(req, res);
-  });
+  }
 
   // ---------- WebSocket ----------
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 });

@@ -115,6 +115,10 @@ describe('Room', () => {
     const r = new Room('Room123456');
     r.join(A, '  Al\u0007ice   the    great ', false);
     expect(r.view(null).participants[0]!.name).toBe('Alice the great');
+    r.join(B, '\u200b\u200b', false);
+    expect(r.view(null).participants[1]!.name).toBe('Anonymous');
+    r.setStory('a\u202eevil\u2066x');
+    expect(r.story).toBe('aevilx');
     r.setStory('x'.repeat(500));
     expect(r.story).toHaveLength(200);
   });
