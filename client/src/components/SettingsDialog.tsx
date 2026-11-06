@@ -1,10 +1,14 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { DECK_IDS, DECKS, LIMITS, type DeckId, type ParticipantView, type RoomView } from '../../../shared/protocol.ts';
 import { navigate } from '../lib/router.ts';
-import { parseCustomInput } from './deck.ts';
+import { validateCustomInput } from './deck.ts';
 
 const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
 
+/**
+ * Native <dialog> opened with showModal(): the browser provides the focus trap, an inert background,
+ * Esc to close and focus return. Every field is applied on Save.
+ */
 export function SettingsDialog({
   room,
   me,
@@ -18,37 +22,64 @@ export function SettingsDialog({
   onProfile: (patch: { name?: string; spectator?: boolean }) => void;
   onDeck: (deckId: DeckId, custom?: string[]) => void;
 }) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const customRef = useRef<HTMLInputElement>(null);
+  const downOnBackdrop = useRef(false);
+  const errorId = useId();
   const [name, setName] = useState(me.name);
+  const [spectator, setSpectator] = useState(me.spectator);
   const [deckId, setDeckId] = useState<DeckId>(room.deckId);
   const [custom, setCustom] = useState(room.deckId === 'custom' ? room.cards.join(', ') : '1, 2, 3, 5, 8, ?');
+  const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    const d = dialogRef.current;
+    if (d && !d.open) d.showModal();
+    nameRef.current?.focus();
+  }, []);
 
+  const validation = deckId === 'custom' ? validateCustomInput(custom) : null;
+  const deckError = submitted ? (validation?.error ?? null) : null;
   const deckChanged =
-    deckId !== room.deckId || (deckId === 'custom' && parseCustomInput(custom).join(',') !== room.cards.join(','));
+    deckId !== room.deckId || (deckId === 'custom' && !!validation && validation.cards.join(',') !== room.cards.join(','));
 
-  function save() {
-    if (name.trim() && name.trim() !== me.name) onProfile({ name: name.trim() });
-    if (deckChanged) onDeck(deckId, deckId === 'custom' ? parseCustomInput(custom) : undefined);
-    onClose();
+  function save(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitted(true);
+    if (validation?.error) {
+      customRef.current?.focus();
+      return;
+    }
+    const patch: { name?: string; spectator?: boolean } = {};
+    if (name.trim() && name.trim() !== me.name) patch.name = name.trim();
+    if (spectator !== me.spectator) patch.spectator = spectator;
+    if (Object.keys(patch).length) onProfile(patch);
+    if (deckChanged) onDeck(deckId, validation ? validation.cards : undefined);
+    dialogRef.current?.close();
   }
 
   return (
-    <div className="modal-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="panel modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <dialog
+      ref={dialogRef}
+      className="settings-dialog"
+      aria-labelledby="settings-title"
+      onClose={onClose}
+      onMouseDown={(e) => (downOnBackdrop.current = e.target === e.currentTarget)}
+      onClick={(e) => {
+        if (e.target === e.currentTarget && downOnBackdrop.current) dialogRef.current?.close();
+      }}
+    >
+      <form className="modal-body" onSubmit={save} noValidate>
         <h2 id="settings-title">Settings</h2>
 
         <label className="field">
           <span>Your name</span>
-          <input value={name} maxLength={LIMITS.nameLength} onChange={(e) => setName(e.target.value)} />
+          <input ref={nameRef} value={name} maxLength={LIMITS.nameLength} onChange={(e) => setName(e.target.value)} />
         </label>
 
         <label className="check">
-          <input type="checkbox" checked={me.spectator} onChange={(e) => onProfile({ spectator: e.target.checked })} />
+          <input type="checkbox" checked={spectator} onChange={(e) => setSpectator(e.target.checked)} />
           <span>Spectator mode (watch without voting)</span>
         </label>
 
@@ -63,27 +94,41 @@ export function SettingsDialog({
           </select>
         </label>
         {deckId === 'custom' && (
-          <label className="field">
-            <span>Cards (comma separated)</span>
-            <input value={custom} onChange={(e) => setCustom(e.target.value)} />
-          </label>
+          <div className="field">
+            <label htmlFor="custom-cards">
+              <span>Cards (comma separated)</span>
+            </label>
+            <input
+              id="custom-cards"
+              ref={customRef}
+              value={custom}
+              onChange={(e) => setCustom(e.target.value)}
+              aria-invalid={deckError ? true : undefined}
+              aria-describedby={deckError ? errorId : undefined}
+            />
+            {deckError && (
+              <p id={errorId} className="form-error" role="alert">
+                {deckError}
+              </p>
+            )}
+          </div>
         )}
         {deckChanged && <p className="muted small">Changing the deck clears everyone’s votes for this round.</p>}
 
-        <div className="row spread">
-          <button className="btn danger-text" onClick={() => navigate('/')}>
+        <div className="dialog-actions">
+          <button type="button" className="btn danger-text" onClick={() => navigate('/')}>
             Leave room
           </button>
           <div className="row">
-            <button className="btn" onClick={onClose}>
+            <button type="button" className="btn" onClick={() => dialogRef.current?.close()}>
               Cancel
             </button>
-            <button className="btn primary" onClick={save}>
+            <button type="submit" className="btn primary">
               Save
             </button>
           </div>
         </div>
-      </div>
-    </div>
+      </form>
+    </dialog>
   );
 }
