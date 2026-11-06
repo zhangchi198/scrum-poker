@@ -1,0 +1,9 @@
+[Unit]
+Description=Deploy scrum-poker main if it moved (pull-based, see /usr/sbin/poker-deploy)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/poker-deploy
+TimeoutStartSec=15min

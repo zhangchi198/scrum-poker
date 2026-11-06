@@ -44,28 +44,42 @@ The server is TypeScript that Node 24 runs directly (type stripping), so it has 
 ## Production
 
 ```
-Internet ─▶ Cloudflare ─▶ cloudflared (systemd, LXC 102) ─▶ 127.0.0.1:3000 ─▶ docker compose "scrum-poker"
+Internet ─▶ Cloudflare ─▶ cloudflared (systemd, in the LXC) ─▶ 127.0.0.1:3000 ─▶ docker compose "scrum-poker"
 ```
 
-- **Host:** Proxmox `192.168.50.4`, **LXC 102 `poker`**. It is an unprivileged Ubuntu 24.04 container with nesting enabled, 2 vCPU, 2 GB RAM and a 16 GB disk, and gets its address over DHCP. Nothing inbound depends on its IP, because both the tunnel and the runner connect outbound.
+The production notes below describe the author's own deployment. To run your own copy, `docker compose up -d --build` behind any reverse proxy that sets `CF-Connecting-IP` (or change `server/app.ts` to read the header your proxy sets; see "Limits and abuse protection").
+
+- **Host:** an unprivileged Ubuntu 24.04 LXC (`poker`) on a home Proxmox box, with nesting enabled, 2 vCPU, 2 GB RAM and a 16 GB disk. Nothing inbound depends on its IP, because the tunnel connects outbound and the deploy pulls.
 - **Ingress:** Cloudflare Tunnel `scrum-poker`, config at `/etc/cloudflared/config.yml` in the LXC. No router ports are open.
-- **CI/CD:** `.github/workflows/ci-cd.yml`. The typecheck, test, build and Docker build run on GitHub-hosted runners. On a push to `main`, the `deploy` job runs on the self-hosted runner `poker-lxc` (label `poker`, user `runner`, in `/home/runner/actions-runner`). It runs `docker compose up -d --build --wait` and then a smoke test.
+- **CI:** `.github/workflows/ci.yml` runs typecheck, tests, the client build and a Docker build on GitHub-hosted runners, for pull requests and pushes to `main`. It never deploys.
+- **Deploy (pull-based):** `deploy/poker-deploy.sh`, installed as `/usr/sbin/poker-deploy` with the units in `deploy/systemd/`. `poker-deploy.timer` runs it every 2 minutes. It fetches `main` into `/opt/scrum-poker` and, when `main` moved and the commit's `Typecheck, test, build` check passed, runs `docker compose build --pull`, then `up -d --wait`, then a smoke test (`/healthz` must report the new short SHA). A failed deploy rolls back to the previous commit and that commit is skipped until `main` moves again. So merging to `main` deploys within about 2 minutes of CI going green. There is deliberately no self-hosted GitHub runner: GitHub never executes anything on the box, so pull requests from forks cannot reach it.
+- **Weekly rebuild:** `poker-rebuild.timer` (Sunday 08:00 UTC) redeploys the current commit with `build --pull`, so `node:24-alpine` OS and Node patches reach prod even when nothing in the repo changed.
 - **Data:** Docker volume `scrum-poker_poker-data` holds `/data/rooms.json`. Losing it ends every open room and every revivable link (tombstone).
-- **Backups:** LXC 102 is in the weekly local vzdump job (Sunday 06:00) on the Proxmox host. It is deliberately left out of the hourly PBS job, which feeds the SnagDeals backup-heartbeat alert. The app is nearly stateless, so the README is enough to rebuild it.
+- **Backups:** the LXC is in a weekly local vzdump job on the Proxmox host, deliberately separate from the hourly backup job of another project on the same box. The app is nearly stateless, so the README is enough to rebuild it.
 
 ### Ops cheatsheet
 
-Run these from the Proxmox host (`ssh root@192.168.50.4`):
+Inside the LXC (from the Proxmox host: `pct enter <ctid>`):
 
 ```sh
-pct enter 102                                   # shell in the LXC
-pct exec 102 -- docker compose -p scrum-poker ps
-pct exec 102 -- docker logs --tail 100 scrum-poker-app-1
-pct exec 102 -- curl -s localhost:3000/healthz   # {"ok":true,"version":"<short commit sha>","rooms":N,"connections":N}
-pct exec 102 -- systemctl status cloudflared actions.runner.*
+docker compose -p scrum-poker ps
+docker logs --tail 100 scrum-poker-app-1
+curl -s localhost:3000/healthz                  # {"ok":true,"version":"<short commit sha>","rooms":N,"connections":N}
+systemctl status cloudflared poker-deploy.timer poker-rebuild.timer
+journalctl -u poker-deploy -u poker-rebuild -n 50   # deploy history
+systemctl start poker-rebuild                   # redeploy now without a code change
+cat /var/lib/poker-deploy/{deployed,failed}     # deployed SHA, and a skipped bad SHA if any
 ```
 
-To redeploy without a code change, use **Actions → CI/CD → Run workflow** on `main`.
+Installing or updating the deploy itself (as root in the LXC; needs `git`, `jq`, `curl`, Docker with compose):
+
+```sh
+install -m 0755 /opt/scrum-poker/deploy/poker-deploy.sh /usr/sbin/poker-deploy
+install -m 0644 /opt/scrum-poker/deploy/systemd/poker-* /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now poker-deploy.timer poker-rebuild.timer
+```
+
+The script does not install itself, so a change to `deploy/` only takes effect after these lines are re-run.
 
 ### Limits and abuse protection
 
@@ -98,10 +112,10 @@ Users can send feedback from the home page footer or from a room's Settings dial
 One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/sbin/poker-set-mail` (root, mode 0750). Use `/usr/sbin` because `pct exec` runs commands with `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so a command in `/usr/local/sbin` is not found, then run this in a terminal (**not** through an AI chat, the script asks for the password):
 
 ```sh
-ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"
+ssh -t root@<proxmox-host> "pct exec <ctid> -- poker-set-mail <your gmail address>"
 ```
 
-It writes `/etc/scrum-poker/mail.env` (root:runner, 0640), recreates the app container, sends a test feedback and prints the mail log lines. Re-run it to rotate the password.
+It writes `/etc/scrum-poker/mail.env` (root:root, 0600), recreates the app container, sends a test feedback and prints the mail log lines. Re-run it to rotate the password.
 
 ### Persistence
 
@@ -109,5 +123,9 @@ It writes `/etc/scrum-poker/mail.env` (root:runner, 0640), recreates the app con
 
 ## Dependency updates
 
-- **Dependabot** (`.github/dependabot.yml`) opens PRs for npm packages and the Docker base image weekly (Monday 06:00 Toronto, with routine minor and patch bumps grouped into one PR), and for GitHub Actions monthly. GitHub security advisories also trigger immediate security-update PRs. Major bumps of the Node base image, `@types/node` and `typescript` are ignored on purpose: prod stays on the Node 24 LTS line, and a TypeScript 7 move is a planned migration. PRs only run the `check` job on GitHub-hosted runners. The self-hosted runner in the LXC only ever deploys `main`, so unmerged dependency code never runs on the box.
-- **Monthly rebuild:** the CI/CD workflow also runs on the 1st of each month (`schedule`), and every deploy runs `docker compose build --pull`. New `node:24-alpine` OS and Node patches therefore reach prod even when nothing in the repo changed.
+- **Dependabot** (`.github/dependabot.yml`) opens PRs for npm packages and the Docker base image weekly (Monday 06:00 Toronto, with routine minor and patch bumps grouped into one PR), and for GitHub Actions monthly. GitHub security advisories also trigger immediate security-update PRs. Major bumps of the Node base image, `@types/node` and `typescript` are ignored on purpose: prod stays on the Node 24 LTS line, and a TypeScript 7 move is a planned migration. PRs only run CI on GitHub-hosted runners. The box only ever pulls `main`, so unmerged dependency code never runs on it.
+- **Weekly rebuild:** see "Weekly rebuild" under Production.
+
+## License
+
+[MIT](LICENSE)

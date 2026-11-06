@@ -1,0 +1,33 @@
+name: CI
+
+# Checks only. Nothing here deploys: the poker LXC pulls main itself and deploys a commit once this
+# workflow's "Typecheck, test, build" check has passed on it (deploy/poker-deploy.sh). There is no
+# self-hosted runner, so workflow code from a pull request never runs on our hardware.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Docker image builds
+        run: docker build -t scrum-poker:ci .
+

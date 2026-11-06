@@ -2,16 +2,16 @@
 # Interactive, one-time (or password-rotation) setup of the feedback email on the poker LXC.
 # Install on the LXC as /usr/sbin/poker-set-mail (pct exec uses PATH=/sbin:/bin:/usr/sbin:/usr/bin) and run as root:
 #
-#   ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"
+#   ssh -t root@<proxmox-host> "pct exec <ctid> -- poker-set-mail <your gmail address>"
 #
 # Run it in a real terminal, not through an AI chat: it asks for a Gmail app password
 # (https://myaccount.google.com/apppasswords), which must never be pasted anywhere else.
 #
-# It writes /etc/scrum-poker/mail.env (root:runner, 0640), recreates the app container so it
+# It writes /etc/scrum-poker/mail.env (root:root, 0600), recreates the app container so it
 # picks the file up, sends one test feedback, and prints the mail-related container log lines.
 set -euo pipefail
 
-CHECKOUT=/home/runner/actions-runner/_work/scrum-poker/scrum-poker
+CHECKOUT=/opt/scrum-poker
 ENV_FILE=/etc/scrum-poker/mail.env
 DEFAULT_ADDR="${1:-}"
 
@@ -24,7 +24,7 @@ if [[ ! -t 0 ]]; then
   exit 1
 fi
 if [[ ! -f "$CHECKOUT/compose.yaml" ]]; then
-  echo "Cannot find the runner checkout at $CHECKOUT (has the first deploy run?)." >&2
+  echo "Cannot find the deploy checkout at $CHECKOUT (has poker-deploy run once?)." >&2
   exit 1
 fi
 
@@ -52,8 +52,8 @@ for v in "$smtp_user" "$feedback_to" "$smtp_pass"; do
   fi
 done
 
-install -d -m 0750 -o root -g runner "$(dirname "$ENV_FILE")"
-umask 027
+install -d -m 0700 -o root -g root "$(dirname "$ENV_FILE")"
+umask 077
 tmp="$(mktemp "$ENV_FILE.XXXXXX")"
 trap 'rm -f "$tmp"' EXIT
 {
@@ -62,14 +62,14 @@ trap 'rm -f "$tmp"' EXIT
   printf 'FEEDBACK_TO=%s\n' "$feedback_to"
 } >"$tmp"
 unset smtp_pass
-chown root:runner "$tmp"
-chmod 0640 "$tmp"
+chown root:root "$tmp"
+chmod 0600 "$tmp"
 mv "$tmp" "$ENV_FILE"
 trap - EXIT
-echo "Wrote $ENV_FILE (root:runner, 0640)."
+echo "Wrote $ENV_FILE (root:root, 0600)."
 
 echo "Recreating the app container..."
-(cd "$CHECKOUT" && docker compose up -d --force-recreate --wait app)
+(cd "$CHECKOUT" && GIT_SHA="$(git rev-parse HEAD)" docker compose -p scrum-poker up -d --force-recreate --wait app)
 
 echo "Sending a test feedback..."
 code="$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:3000/api/feedback \
