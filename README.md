@@ -69,6 +69,7 @@ To redeploy without a code change, use **Actions → CI/CD → Run workflow** on
 - Each WebSocket connection is rate-limited to 10 messages per second, with bursts up to 30, and messages are capped at 4 KB. Binary frames cost a token too, and a socket that is rejected 50 times within 10 seconds is closed (1008).
 - At most 5 sockets per client id in a room (the 6th is told `rate_limited` and closed) and 200 sockets per IP, which is generous because whole offices share one public IP (further upgrades get HTTP 429). A socket that has not joined a room within 10 seconds is closed (4000).
 - `POST /api/rooms` bodies over 2 KB get HTTP 413.
+- `GET /api/rooms/:id` (used by the room page to check a room exists before asking for a name) returns only the story, the number of connected voters and the deck name, never a vote. It is limited to 60 requests per minute per IP.
 - A WebSocket upgrade is only accepted from the same origin. The server sends a strict CSP, `Referrer-Policy: no-referrer`, `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, because other subdomains of the domain are not ours), `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Resource-Policy: same-origin`, so room links don't leak.
 - **`CF-Connecting-IP` is trusted verbatim** for the per-IP limits. That is safe only because port 3000 is bound to loopback and reachable solely through cloudflared, which sets the header. Never expose the port directly, or anyone could pick their own "IP".
 
@@ -82,7 +83,7 @@ Users can send feedback from the home page footer or from a room's Settings dial
 - **Email:** plain text only. Subject `Scrum Poker feedback: N new (B bugs, I ideas, O other)`; times are shown in UTC and America/Toronto; Reply-To is set when the digest has exactly one address-like contact.
 - **Config:** environment variables `SMTP_USER`, `SMTP_PASS`, `FEEDBACK_TO` (all three required), plus optional `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (default `465`, TLS) and `FEEDBACK_FROM` (default `SMTP_USER`). Without the three required ones the app logs `feedback email disabled (no SMTP config)` and only stores feedback. `compose.yaml` reads them from the optional file `/etc/scrum-poker/mail.env`, which is never committed.
 
-One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/local/sbin/poker-set-mail` (root, mode 0755), then run this in a terminal (**not** through an AI chat, the script asks for the password):
+One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/sbin/poker-set-mail` (root, mode 0750). Use `/usr/sbin` because `pct exec` runs commands with `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so a command in `/usr/local/sbin` is not found, then run this in a terminal (**not** through an AI chat, the script asks for the password):
 
 ```sh
 ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"

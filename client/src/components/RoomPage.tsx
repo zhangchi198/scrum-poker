@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { computeStats } from '../../../shared/protocol.ts';
-import { loadIdentity, saveIdentity, type Identity } from '../lib/identity.ts';
+import { computeStats, type RoomLookup } from '../../../shared/protocol.ts';
+import { IDENTITY_KEY, loadIdentity, saveIdentity } from '../lib/identity.ts';
+import { forgetJoined, hasJoined, markJoined, readSpectator, writeSpectator } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
+import { nudgeTargets, tallyVotes, voteStatus } from '../lib/tally.ts';
 import { useRoom } from '../lib/useRoom.ts';
 import { Hand } from './Hand.tsx';
 import { JoinDialog } from './JoinDialog.tsx';
+import { NotFound } from './NotFound.tsx';
 import { Reactions } from './Reactions.tsx';
 import { Seat } from './Seat.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
@@ -26,10 +29,12 @@ interface Toast {
 let seq = 0;
 
 export function RoomPage({ roomId }: { roomId: string }) {
-  const [identity, setIdentity] = useState<Identity | null>(() => {
-    const id = loadIdentity();
-    return id.name ? id : null;
-  });
+  // The join dialog shows on the first visit to a room in this browser (the creator, who typed a name on Home, skips it).
+  const [joined, setJoined] = useState(() => !!loadIdentity().name && hasJoined(roomId));
+  // Per tab and room, never stored where a later room could inherit it.
+  const spectatorRef = useRef(readSpectator(roomId));
+  // What the server says about this room, fetched before asking for a name: undefined = still checking.
+  const [lookup, setLookup] = useState<RoomLookup | 'missing' | null | undefined>(undefined);
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [shakeKey, setShakeKey] = useState(0);
@@ -53,7 +58,8 @@ export function RoomPage({ roomId }: { roomId: string }) {
     setTimeout(() => setFloaters((f) => f.filter((x) => x.key !== key)), 2800);
   }, []);
 
-  const { room, you, status, fatal, clockOffset, send } = useRoom(roomId, identity, {
+  const getJoinInfo = useCallback(() => ({ ...loadIdentity(), spectator: spectatorRef.current }), []);
+  const { room, you, status, fatal, joinError, retry, clockOffset, send } = useRoom(roomId, joined, getJoinInfo, {
     onReaction: (r) => float(r.emoji, r.name),
     onNudge: (fromName) => {
       toast(`👋 ${fromName} is waiting on your vote`);
@@ -67,17 +73,18 @@ export function RoomPage({ roomId }: { roomId: string }) {
   const me = room?.participants.find((p) => p.id === you) ?? null;
   const players = useMemo(() => room?.participants.filter((p) => !p.spectator) ?? [], [room]);
   const spectators = room?.participants.filter((p) => p.spectator) ?? [];
-  const votedCount = players.filter((p) => p.voted).length;
-  const onlinePlayers = players.filter((p) => p.connected);
-  const pending = onlinePlayers.filter((p) => !p.voted).length;
+  const tally = tallyVotes(players);
+  const votedCount = tally.voted;
+  const pending = nudgeTargets(room?.participants ?? [], you);
 
+  // A voter who switched to spectator after the reveal keeps their vote in the results.
   const stats = useMemo(() => {
     if (!room?.revealed) return null;
     return computeStats(
-      players.map((p) => p.vote).filter((v): v is string => v !== null),
+      room.participants.map((p) => p.vote).filter((v): v is string => v !== null),
       room.cards,
     );
-  }, [room, players]);
+  }, [room]);
 
   // Celebrate consensus once per round.
   const celebrated = useRef(-1);
@@ -125,24 +132,79 @@ export function RoomPage({ roomId }: { roomId: string }) {
     document.title = room?.story ? `${room.story} · Scrum Poker` : 'Scrum Poker';
   }, [room?.story]);
 
-  if (!identity) {
+  // Before asking for a name, check the room exists (and get context for the dialog).
+  useEffect(() => {
+    if (joined) return;
+    const ctl = new AbortController();
+    fetch(`/api/rooms/${roomId}`, { signal: ctl.signal })
+      .then(async (res) => {
+        if (res.status === 404) return setLookup('missing');
+        if (!res.ok) return setLookup(null); // rate limited etc.: just show the dialog without context
+        setLookup((await res.json()) as RoomLookup);
+      })
+      .catch(() => {
+        if (!ctl.signal.aborted) setLookup(null);
+      });
+    return () => ctl.abort();
+  }, [joined, roomId]);
+
+  // Another tab changed the name: pick it up here and tell the room.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== IDENTITY_KEY) return;
+      const name = loadIdentity().name;
+      if (name && joined) send({ t: 'profile', name });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [joined, send]);
+
+  if (!joined) {
+    if (lookup === undefined) {
+      return (
+        <div className="center-page">
+          <p className="muted">Looking for the room…</p>
+        </div>
+      );
+    }
+    if (lookup === 'missing') {
+      return <NotFound title="Room not found" message="This room does not exist or has expired." action="Start a new room" />;
+    }
     return (
       <JoinDialog
-        onJoin={(name, spectator) => setIdentity(saveIdentity({ name, spectator }))}
+        info={lookup}
+        onJoin={(name, spectator) => {
+          saveIdentity({ name });
+          spectatorRef.current = spectator;
+          writeSpectator(roomId, spectator);
+          markJoined(roomId);
+          setJoined(true);
+        }}
         onCancel={() => navigate('/')}
       />
     );
   }
 
   if (fatal) {
+    return <NotFound title={fatal.code === 'room_full' ? 'Room is full' : 'Room not found'} message={fatal.message} action="Start a new room" />;
+  }
+
+  if (joinError) {
     return (
       <div className="center-page">
         <div className="panel">
-          <h2>{fatal.code === 'room_full' ? 'Room is full' : 'Room not found'}</h2>
-          <p className="muted">{fatal.message}</p>
-          <button className="btn primary" onClick={() => navigate('/')}>
-            Start a new room
-          </button>
+          <h2>Couldn’t join the room</h2>
+          <p className="muted" role="alert">
+            {joinError}
+          </p>
+          <div className="row">
+            <button className="btn" onClick={() => navigate('/')}>
+              Home
+            </button>
+            <button className="btn primary" autoFocus onClick={retry}>
+              Try again
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -171,8 +233,18 @@ export function RoomPage({ roomId }: { roomId: string }) {
   }
 
   function updateProfile(patch: { name?: string; spectator?: boolean }) {
-    setIdentity(saveIdentity(patch));
+    if (patch.name) saveIdentity({ name: patch.name });
+    if (patch.spectator !== undefined) {
+      spectatorRef.current = patch.spectator;
+      writeSpectator(roomId, patch.spectator);
+    }
     send({ t: 'profile', ...patch });
+  }
+
+  function leaveRoom() {
+    send({ t: 'leave' });
+    forgetJoined(roomId);
+    navigate('/');
   }
 
   const canVote = me && !me.spectator && !room.revealed;
@@ -229,21 +301,17 @@ export function RoomPage({ roomId }: { roomId: string }) {
           {!room.revealed ? (
             <>
               <p className="table-status">
-                {players.length === 0
-                  ? 'Waiting for players…'
-                  : votedCount === 0
-                    ? 'Pick your cards!'
-                    : `${votedCount} of ${players.length} voted`}
+                {voteStatus(tally)}
               </p>
               <button
                 ref={setActionEl}
-                className={`btn primary big ${votedCount > 0 && pending === 0 ? 'pulse' : ''}`}
+                className={`btn primary big ${votedCount > 0 && tally.votedOnline === tally.online ? 'pulse' : ''}`}
                 disabled={votedCount === 0}
                 onClick={() => send({ t: 'reveal' })}
               >
                 Reveal cards
               </button>
-              {votedCount > 0 && pending > 0 && (
+              {votedCount > 0 && pending > 0 && !me?.spectator && (
                 <button className="link-btn" onClick={() => send({ t: 'nudge' })}>
                   👋 Nudge {pending === 1 ? 'the one who hasn’t' : `the ${pending} who haven’t`} voted
                 </button>
@@ -334,6 +402,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
           }}
           onProfile={updateProfile}
           onDeck={(deckId, custom) => send({ t: 'deck', deckId, custom })}
+          onLeave={leaveRoom}
         />
       )}
     </div>

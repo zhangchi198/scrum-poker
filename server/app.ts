@@ -2,7 +2,7 @@ import { createReadStream, existsSync, readFileSync, renameSync, statSync, write
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DECK_IDS, REACTIONS, type ClientMsg, type ServerMsg } from '../shared/protocol.ts';
+import { DECKS, DECK_IDS, REACTIONS, type ClientMsg, type DeckId, type RoomLookup, type ServerMsg } from '../shared/protocol.ts';
 import { FEEDBACK_LIMITS } from '../shared/feedback.ts';
 import { createFeedback, mailConfigFromEnv, type MailConfig, type MailTransport } from './feedback.ts';
 import { Room, RoomError, isTombstone, randomId, type RoomSnapshot, type Tombstone } from './room.ts';
@@ -22,6 +22,8 @@ export interface AppOptions {
   roomsPerIpPerHour?: number;
   maxSocketsPerIp?: number;
   maxSocketsPerClient?: number;
+  /** `GET /api/rooms/:id` lookups allowed per IP per minute (default 60). */
+  lookupsPerIpPerMinute?: number;
   /** A socket must send a valid join within this long or it is closed (code 4000). */
   joinDeadlineMs?: number;
   /** Close a socket (1008) after this many rate-limit rejections within 10 seconds. */
@@ -102,6 +104,7 @@ export function createApp(opts: AppOptions = {}) {
   const roomsPerIp = opts.roomsPerIpPerHour ?? 30;
   const maxSocketsPerIp = opts.maxSocketsPerIp ?? 200; // generous: whole offices share one public IP behind NAT
   const maxSocketsPerClient = opts.maxSocketsPerClient ?? 5;
+  const lookupsPerIp = opts.lookupsPerIpPerMinute ?? 60;
   const joinDeadlineMs = opts.joinDeadlineMs ?? 10_000;
   const abuseKickThreshold = opts.abuseKickThreshold ?? 50;
   const saveDebounceMs = opts.saveDebounceMs ?? 2000;
@@ -113,6 +116,7 @@ export function createApp(opts: AppOptions = {}) {
   const conns = new Set<Conn>();
   const createdByIp = new Map<string, number[]>();
   const socketsByIp = new Map<string, number>();
+  const lookupsByIp = new Map<string, number[]>();
   let dirty = false;
   let saveTimer: NodeJS.Timeout | null = null;
 
@@ -295,6 +299,20 @@ export function createApp(opts: AppOptions = {}) {
     return 'ok';
   }
 
+  /** Counts one room lookup for this IP; false once the per-minute budget is spent. */
+  function takeLookup(ip: string, now: number): boolean {
+    const recent = (lookupsByIp.get(ip) ?? []).filter((t) => now - t < 60_000);
+    if (recent.length >= lookupsPerIp) {
+      lookupsByIp.set(ip, recent);
+      return false;
+    }
+    recent.push(now);
+    lookupsByIp.set(ip, recent);
+    return true;
+  }
+
+  const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
+
   function handle(c: Conn, msg: ClientMsg) {
     if (msg.t === 'ping') return send(c.ws, { t: 'pong' });
 
@@ -364,6 +382,13 @@ export function createApp(opts: AppOptions = {}) {
       case 'profile':
         if (room.setProfile(clientId, msg.name, msg.spectator, clock())) broadcastState(room);
         return;
+      case 'leave': {
+        // Gone immediately (no grace period). This socket is detached; other tabs of the same client find out on their next message.
+        room.remove(clientId, clock());
+        c.room = null;
+        c.clientId = null;
+        return broadcastState(room);
+      }
       case 'timer':
         room.setTimer(msg.seconds, clock());
         return broadcastState(room);
@@ -381,9 +406,10 @@ export function createApp(opts: AppOptions = {}) {
         if (now - room.lastNudgeAt < NUDGE_COOLDOWN_MS) {
           return send(c.ws, { t: 'error', code: 'rate_limited', message: 'Give them a few seconds before nudging again.' });
         }
-        room.lastNudgeAt = now;
         const targets = new Set(room.pendingVoters());
         targets.delete(clientId);
+        if (targets.size === 0) return; // nobody to nudge: don't burn the room's cooldown
+        room.lastNudgeAt = now;
         for (const o of conns) if (o.room === room && o.clientId && targets.has(o.clientId)) send(o.ws, { t: 'nudge', fromName: me.name });
         return;
       }
@@ -532,6 +558,29 @@ export function createApp(opts: AppOptions = {}) {
     }
   });
 
+  /**
+   * Lets the room page decide what to show before asking for a name. The room id is the only secret, so this
+   * returns only what joining would show anyway (story, head-count, deck), never a vote, and is rate-limited per
+   * IP so it cannot enumerate ids faster than joining could.
+   */
+  function lookupRoom(req: IncomingMessage, res: ServerResponse, id: string) {
+    const now = clock();
+    if (!takeLookup(clientIp(req), now)) return json(res, 429, { error: 'Too many requests. Try again in a minute.' }, { 'Retry-After': '60' });
+    const room = ROOM_ID.test(id) ? rooms.get(id) : undefined;
+    if (room) {
+      let players = 0;
+      for (const p of room.participants.values()) if (!p.spectator && p.connections > 0) players++;
+      const body: RoomLookup = { status: 'live', story: room.story, players, deckLabel: deckLabel(room.deckId) };
+      return json(res, 200, body);
+    }
+    const tomb = ROOM_ID.test(id) ? tombstones.get(id) : undefined;
+    if (tomb && !tombstoneExpired(tomb, now)) {
+      const body: RoomLookup = { status: 'revivable', deckLabel: deckLabel(tomb.deckId) };
+      return json(res, 200, body);
+    }
+    json(res, 404, { error: 'Room not found' });
+  }
+
   function route(req: IncomingMessage, res: ServerResponse) {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
     if (path === '/healthz') return json(res, 200, { ok: true, rooms: rooms.size, connections: conns.size });
@@ -549,6 +598,8 @@ export function createApp(opts: AppOptions = {}) {
       });
       return;
     }
+    const lookup = /^\/api\/rooms\/([^/]+)$/.exec(path);
+    if (lookup && (req.method === 'GET' || req.method === 'HEAD')) return lookupRoom(req, res, lookup[1]!);
     if (path.startsWith('/api/')) return json(res, 404, { error: 'Not found' });
     if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: 'Method not allowed' });
     serveStatic(req, res);
@@ -667,6 +718,11 @@ export function createApp(opts: AppOptions = {}) {
         tombstones.delete(id);
         markDirty();
       }
+    }
+    for (const [ip, times] of lookupsByIp) {
+      const keep = times.filter((t) => now - t < 60_000);
+      if (keep.length) lookupsByIp.set(ip, keep);
+      else lookupsByIp.delete(ip);
     }
     for (const [ip, times] of createdByIp) {
       const keep = times.filter((t) => now - t < 3600_000);

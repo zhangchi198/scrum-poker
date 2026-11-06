@@ -63,7 +63,13 @@ export type ClientMsg =
   | { t: 'timer'; seconds: number | null }
   | { t: 'react'; emoji: string }
   | { t: 'nudge' }
+  | { t: 'leave' }
   | { t: 'ping' };
+
+/** `GET /api/rooms/:id`. Reveals nothing that joining would not, and never any vote. */
+export type RoomLookup =
+  | { status: 'live'; story: string; players: number; deckLabel: string }
+  | { status: 'revivable'; deckLabel: string };
 
 export type ErrorCode = 'room_not_found' | 'room_full' | 'bad_request' | 'rate_limited' | 'not_joined';
 

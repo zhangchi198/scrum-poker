@@ -703,3 +703,149 @@ describe('socket hardening', () => {
     }
   });
 });
+
+describe('game state and join flow', () => {
+  const DAY = 24 * 3600_000;
+
+  async function join(wsUrl: string, roomId: string, clientId: string, name: string, spectator = false) {
+    const c = await client(wsUrl);
+    c.send({ t: 'join', roomId, clientId, name, spectator });
+    const welcome = await c.next('welcome');
+    return Object.assign(c, { welcome });
+  }
+
+  it('leave removes the seat immediately, broadcasts it, and detaches the socket', async () => {
+    const { app, base, ws } = await start({ graceMs: 60_000 });
+    const roomId = (await createRoom(base)).body.id!;
+    const a = await join(ws, roomId, ID_A, 'Alice');
+    const b = await join(ws, roomId, ID_B, 'Bob');
+    b.send({ t: 'vote', value: '8' });
+    await a.next('state', (m) => m.room.participants.some((p) => p.voted));
+    b.send({ t: 'leave' });
+    await until(() => !app.rooms.get(roomId)!.participants.has(ID_B)); // long before the 60s grace period
+    a.send({ t: 'ping' });
+    await a.next('pong');
+    const last = [...a.raw].reverse().map((r) => JSON.parse(r) as ServerMsg).find((m) => m.t === 'state')!;
+    if (last.t !== 'state') throw new Error('no state');
+    expect(last.room.participants.map((p) => p.name)).toEqual(['Alice']);
+    expect(last.room.participants[0]!.voted).toBe(false);
+    // Detached: later room messages are refused, and the closing socket does not re-broadcast.
+    b.send({ t: 'vote', value: '3' });
+    expect(await b.next('error')).toMatchObject({ code: 'not_joined' });
+    const statesSeen = () => b.raw.filter((r) => r.startsWith('{"t":"state"')).length;
+    const before = statesSeen();
+    a.send({ t: 'vote', value: '5' });
+    await a.next('state', (m) => m.room.participants[0]!.voted);
+    b.send({ t: 'ping' });
+    await b.next('pong');
+    expect(statesSeen()).toBe(before); // no longer receives this room's broadcasts
+    b.ws.close();
+    await closed(b.ws);
+    expect(app.rooms.get(roomId)!.participants.size).toBe(1);
+  });
+
+  it('a nudge with nobody to nudge does not start the room cooldown', async () => {
+    const { base, ws } = await start();
+    const roomId = (await createRoom(base)).body.id!;
+    const a = await join(ws, roomId, ID_A, 'Alice');
+    a.send({ t: 'vote', value: '3' });
+    await a.next('state', (m) => m.room.participants[0]!.voted);
+    a.send({ t: 'nudge' }); // only you: nothing to do
+    a.send({ t: 'ping' });
+    await a.next('pong');
+    const b = await join(ws, roomId, ID_B, 'Bob');
+    a.send({ t: 'nudge' });
+    expect(await b.next('nudge')).toMatchObject({ fromName: 'Alice' });
+    expect(a.raw.join('\n')).not.toContain('rate_limited');
+  });
+
+  it('keeps results unchanged when a voter flips to spectator after the reveal', async () => {
+    const { base, ws } = await start();
+    const roomId = (await createRoom(base)).body.id!;
+    const a = await join(ws, roomId, ID_A, 'Alice');
+    const b = await join(ws, roomId, ID_B, 'Bob');
+    a.send({ t: 'vote', value: '3' });
+    b.send({ t: 'vote', value: '8' });
+    await a.next('state', (m) => m.room.participants.every((p) => p.voted));
+    a.send({ t: 'reveal' });
+    await b.next('state', (m) => m.room.revealed);
+    b.send({ t: 'profile', spectator: true });
+    const st = await a.next('state', (m) => m.room.participants.some((p) => p.spectator));
+    expect(st.room.participants.map((p) => p.vote).sort()).toEqual(['3', '8']);
+  });
+
+  describe('GET /api/rooms/:id', () => {
+    const get = (base: string, id: string, headers: Record<string, string> = {}) => fetch(`${base}/api/rooms/${id}`, { headers });
+
+    it('describes a live room with only the story, head-count and deck, never votes', async () => {
+      const { app, base, ws } = await start();
+      const roomId = (await createRoom(base, { deckId: 'tshirt' })).body.id!;
+      const a = await join(ws, roomId, ID_A, 'Alice');
+      const b = await join(ws, roomId, ID_B, 'Bob');
+      await join(ws, roomId, ID_C, 'Cara', true);
+      a.send({ t: 'story', story: 'Login page' });
+      a.send({ t: 'vote', value: 'XL' });
+      await b.next('state', (m) => m.room.story === 'Login page' && m.room.participants.some((p) => p.voted));
+      b.ws.close();
+      await until(() => app.rooms.get(roomId)!.connectedCount === 2);
+      const res = await get(base, roomId);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      const body = (await res.json()) as Record<string, unknown>;
+      expect(Object.keys(body).sort()).toEqual(['deckLabel', 'players', 'status', 'story']);
+      expect(body).toMatchObject({ status: 'live', story: 'Login page', deckLabel: 'T-shirt sizes' });
+      expect(JSON.stringify(body)).not.toContain('XL');
+    });
+
+    it('counts only connected non-spectators', async () => {
+      const { app, base, ws } = await start();
+      const roomId = (await createRoom(base)).body.id!;
+      await join(ws, roomId, ID_A, 'Alice');
+      const b = await join(ws, roomId, ID_B, 'Bob');
+      await join(ws, roomId, ID_C, 'Cara', true);
+      b.ws.close();
+      await until(() => app.rooms.get(roomId)!.connectedCount === 2);
+      expect(await (await get(base, roomId)).json()).toMatchObject({ status: 'live', players: 1 });
+    });
+
+    it('reports a revivable tombstone without reviving it, and 404 once it is gone or never existed', async () => {
+      const clock = fakeClock();
+      const s = await start({ now: clock.now });
+      const roomId = (await createRoom(s.base, { deckId: 'powers' })).body.id!;
+      const a = await join(s.ws, roomId, ID_A, 'Alice');
+      a.ws.close();
+      await until(() => s.app.rooms.get(roomId)!.connectedCount === 0);
+      clock.t += 31 * DAY;
+      s.app.sweep();
+      expect(s.app.tombstones.has(roomId)).toBe(true);
+      const res = await get(s.base, roomId);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ status: 'revivable', deckLabel: 'Powers of 2' });
+      expect(s.app.rooms.size).toBe(0); // looking does not revive
+      expect((await get(s.base, 'Nope123456')).status).toBe(404);
+      expect((await get(s.base, 'short')).status).toBe(404);
+      clock.t += 70 * DAY; // past the 90-day tombstone window, before sweeping
+      expect((await get(s.base, roomId)).status).toBe(404);
+    });
+
+    it('is rate limited per IP, and the window slides', async () => {
+      const clock = fakeClock();
+      const { base } = await start({ now: clock.now, lookupsPerIpPerMinute: 3 });
+      const ip = { 'cf-connecting-ip': '203.0.113.7' };
+      for (let i = 0; i < 3; i++) expect((await get(base, 'Nope123456', ip)).status).toBe(404);
+      const limited = await get(base, 'Nope123456', ip);
+      expect(limited.status).toBe(429);
+      expect(limited.headers.get('retry-after')).toBe('60');
+      // Another network is unaffected.
+      expect((await get(base, 'Nope123456', { 'cf-connecting-ip': '203.0.113.8' })).status).toBe(404);
+      clock.t += 61_000;
+      expect((await get(base, 'Nope123456', ip)).status).toBe(404);
+    });
+
+    it('does not shadow other API paths or methods', async () => {
+      const { base } = await start();
+      expect((await fetch(`${base}/api/rooms/Nope123456`, { method: 'POST' })).status).toBe(404);
+      expect((await fetch(`${base}/api/nothing`)).status).toBe(404);
+    });
+  });
+});

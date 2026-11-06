@@ -206,3 +206,37 @@ describe('Room', () => {
     expect(() => Room.restore(null as never)).toThrow('malformed');
   });
 });
+
+describe('Room: spectator switch, leave', () => {
+  it('keeps a revealed vote when the voter becomes a spectator (setProfile), but clears it before the reveal', () => {
+    const r = room3();
+    r.vote(A, '5');
+    r.vote(B, '8');
+    r.setProfile(A, undefined, true, 1); // before reveal: the vote goes
+    expect(r.participants.get(A)!.vote).toBeNull();
+    r.reveal(2);
+    r.setProfile(B, undefined, true, 3); // after reveal: results must not change
+    expect(r.participants.get(B)).toMatchObject({ spectator: true, vote: '8' });
+    expect(r.view(A).participants.find((p) => p.name === 'Bob')!.vote).toBe('8');
+  });
+
+  it('keeps a revealed vote when a voter rejoins as a spectator (join), but clears it before the reveal', () => {
+    const r = room3();
+    r.vote(A, '5');
+    r.vote(B, '8');
+    r.join(A, 'Alice', true, 1);
+    expect(r.participants.get(A)!.vote).toBeNull();
+    r.reveal(2);
+    r.join(B, 'Bob', true, 3);
+    expect(r.participants.get(B)).toMatchObject({ spectator: true, vote: '8' });
+  });
+
+  it('remove() drops the seat and its vote at once, with no grace period', () => {
+    const r = room3();
+    r.vote(A, '5');
+    expect(r.remove(A, 1)).toBe(true);
+    expect(r.participants.has(A)).toBe(false);
+    expect(r.remove(A, 2)).toBe(false);
+    expect(r.view(B).participants.map((p) => p.name)).toEqual(['Bob', 'Cara']);
+  });
+});
