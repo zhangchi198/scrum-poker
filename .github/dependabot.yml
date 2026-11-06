@@ -9,6 +9,13 @@ updates:
       time: '06:00'
       timezone: America/Toronto
     open-pull-requests-limit: 5
+    ignore:
+      # Types must match the Node runtime in prod (node:24-alpine LTS); bump together with the base image on purpose.
+      - dependency-name: '@types/node'
+        update-types: ['version-update:semver-major']
+      # TypeScript 7 is the native (Go) compiler: a planned migration, not a routine bump.
+      - dependency-name: typescript
+        update-types: ['version-update:semver-major']
     groups:
       # One PR per week for routine bumps instead of a PR per package.
       minor-and-patch:
@@ -20,6 +27,10 @@ updates:
       day: monday
       time: '06:00'
       timezone: America/Toronto
+    ignore:
+      # Stay on the Node LTS line (24). Odd majors (25, 27) are short-lived; moving to the next LTS is a deliberate change.
+      - dependency-name: node
+        update-types: ['version-update:semver-major']
   - package-ecosystem: github-actions
     directory: /
     schedule:
