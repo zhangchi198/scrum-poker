@@ -83,7 +83,7 @@ Users can send feedback from the home page footer or from a room's Settings dial
 - **Email:** plain text only. Subject `Scrum Poker feedback: N new (B bugs, I ideas, O other)`; times are shown in UTC and America/Toronto; Reply-To is set when the digest has exactly one address-like contact.
 - **Config:** environment variables `SMTP_USER`, `SMTP_PASS`, `FEEDBACK_TO` (all three required), plus optional `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (default `465`, TLS) and `FEEDBACK_FROM` (default `SMTP_USER`). Without the three required ones the app logs `feedback email disabled (no SMTP config)` and only stores feedback. `compose.yaml` reads them from the optional file `/etc/scrum-poker/mail.env`, which is never committed.
 
-One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/local/sbin/poker-set-mail` (root, mode 0755), then run this in a terminal (**not** through an AI chat, the script asks for the password):
+One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/sbin/poker-set-mail` (root, mode 0750). Use `/usr/sbin` because `pct exec` runs commands with `PATH=/sbin:/bin:/usr/sbin:/usr/bin`, so a command in `/usr/local/sbin` is not found, then run this in a terminal (**not** through an AI chat, the script asks for the password):
 
 ```sh
 ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"

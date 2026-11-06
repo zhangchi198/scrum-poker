@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Interactive, one-time (or password-rotation) setup of the feedback email on the poker LXC.
-# Install on the LXC as /usr/local/sbin/poker-set-mail and run as root:
+# Install on the LXC as /usr/sbin/poker-set-mail (pct exec uses PATH=/sbin:/bin:/usr/sbin:/usr/bin) and run as root:
 #
 #   ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"
 #
