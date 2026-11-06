@@ -46,6 +46,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Build and restart
+        env:
+          GIT_SHA: ${{ github.sha }}
         # --pull fetches the newest node:24-alpine so OS and Node patches are picked up on every deploy.
         run: |
           docker compose build --pull

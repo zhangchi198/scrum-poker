@@ -35,7 +35,8 @@ Layout:
 | `shared/protocol.ts` | Wire protocol types, decks, limits, and stats math. Used by both the server and the client. |
 | `server/room.ts` | Pure room state machine: votes, reveal, deck, timer, presence, snapshots. |
 | `server/app.ts` | HTTP (static files, `POST /api/rooms`, `/healthz`) and WebSocket (`/ws`), with rate limits and persistence. |
-| `client/src` | React UI. No UI library, plain CSS. |
+| `server/vitals.ts`, `scripts/vitals-summary.ts` | Real-user timing storage and its summary CLI (see "Real-user timing"). |
+| `client/src` | Preact UI (React API through `preact/compat`, aliased in `vite.config.ts`). No UI library, plain CSS. |
 | `test/` | Vitest: room logic, stats, and end-to-end WebSocket tests against a real server. |
 
 The server is TypeScript that Node 24 runs directly (type stripping), so it has no build step. Only the client is bundled.
@@ -60,7 +61,7 @@ Run these from the Proxmox host (`ssh root@192.168.50.4`):
 pct enter 102                                   # shell in the LXC
 pct exec 102 -- docker compose -p scrum-poker ps
 pct exec 102 -- docker logs --tail 100 scrum-poker-app-1
-pct exec 102 -- curl -s localhost:3000/healthz   # {"ok":true,"rooms":N,"connections":N}
+pct exec 102 -- curl -s localhost:3000/healthz   # {"ok":true,"version":"<short commit sha>","rooms":N,"connections":N}
 pct exec 102 -- systemctl status cloudflared actions.runner.*
 ```
 
@@ -72,9 +73,17 @@ To redeploy without a code change, use **Actions → CI/CD → Run workflow** on
 - Each WebSocket connection is rate-limited to 10 messages per second, with bursts up to 30, and messages are capped at 4 KB. Binary frames cost a token too, and a socket that is rejected 50 times within 10 seconds is closed (1008).
 - At most 5 sockets per client id in a room (the 6th is told `rate_limited` and closed) and 200 sockets per IP, which is generous because whole offices share one public IP (further upgrades get HTTP 429). A socket that has not joined a room within 10 seconds is closed (4000).
 - `POST /api/rooms` bodies over 2 KB get HTTP 413.
-- `GET /api/rooms/:id` (used by the room page to check a room exists before asking for a name) returns only the story, the number of connected voters and the deck name, never a vote. It is limited to 60 requests per minute per IP.
+- `GET /api/rooms/:id` (used by the room page to check a room exists before asking for a name) returns only the story, the number of connected voters and the deck name, never a vote. It is limited to 60 requests per minute per IP. An invite link (`GET /r/<id>`) carries the same JSON inline as `<script type="application/json" id="room-lookup">` (with `<` escaped), so the page needs no extra round trip. That counts against the same per-IP budget; once it is spent the plain page is served and the client fetches instead. Such a response is `Cache-Control: private, no-store` with no validators, so neither browsers nor Cloudflare keep per-room HTML. The shell and assets send `ETag`/`Last-Modified` and answer 304.
 - A WebSocket upgrade is only accepted from the same origin. The server sends a strict CSP, `Referrer-Policy: no-referrer`, `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, because other subdomains of the domain are not ours), `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Resource-Policy: same-origin`, so room links don't leak.
 - **`CF-Connecting-IP` is trusted verbatim** for the per-IP limits. That is safe only because port 3000 is bound to loopback and reachable solely through cloudflared, which sets the header. Never expose the port directly, or anyone could pick their own "IP".
+
+### Real-user timing
+
+Every page load sends one `navigator.sendBeacon('/api/vitals')` once the room is interactive, 10 seconds after load, or when the tab is hidden, whichever is first. It carries Navigation Timing (DNS, connect, TLS, TTFB, DOMContentLoaded, load), first/largest contentful paint, app milestones (room lookup, WebSocket open, `welcome`, first hand render), `cold` (the document came over the network), `nextHopProtocol`, `effectiveType`, viewport size and a coarse "Browser/OS" label, plus the page kind (`home`, `room`, `join`, `other`). A room id, URL, name or vote is never included, and neither is the IP address.
+
+- **Limits:** bodies over 4 KB get 413; numbers are clamped and strings truncated; 30 beacons per IP per hour and 2000 per day overall (429). The reply is 204.
+- **Storage:** `vitals.jsonl` next to `DATA_FILE` (memory only without it), rotated to `vitals.jsonl.1` at about 5 MB.
+- **Reading it:** `docker exec scrum-poker-app-1 node scripts/vitals-summary.ts [-n 20] [--cold]` prints the last records and p50/p90 per metric per page kind (`npm run vitals -- --file path` locally).
 
 ### Feedback email
 

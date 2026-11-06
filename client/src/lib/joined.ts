@@ -1,3 +1,5 @@
+import { loadIdentity } from './identity.ts';
+
 export const JOINED_CAP = 50;
 const KEY = 'poker.rooms.v1';
 
@@ -28,6 +30,11 @@ let session: string[] = [];
 
 export function hasJoined(id: string): boolean {
   return session.includes(id) || read().includes(id);
+}
+
+/** This browser has a name and has been in this room before, so the join dialog is skipped. */
+export function resumable(id: string): boolean {
+  return !!loadIdentity().name && hasJoined(id);
 }
 
 export function markJoined(id: string) {

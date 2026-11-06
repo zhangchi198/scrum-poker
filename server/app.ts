@@ -1,10 +1,12 @@
-import { createReadStream, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, renameSync, statSync, writeFileSync, type Stats } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DECKS, DECK_IDS, REACTIONS, type ClientMsg, type DeckId, type RoomLookup, type ServerMsg } from '../shared/protocol.ts';
 import { FEEDBACK_LIMITS } from '../shared/feedback.ts';
 import { createFeedback, mailConfigFromEnv, type MailConfig, type MailTransport } from './feedback.ts';
+import { MAX_BEACON_BYTES } from '../shared/vitals.ts';
+import { createVitals } from './vitals.ts';
 import { Room, RoomError, isTombstone, randomId, type RoomSnapshot, type Tombstone } from './room.ts';
 
 export interface AppOptions {
@@ -42,6 +44,13 @@ export interface AppOptions {
   feedbackGlobalLimitPerDay?: number;
   /** How often to retry/check for a due digest (default 10 minutes). */
   feedbackTickMs?: number;
+  /** Deployed version shown by /healthz (default `dev`). */
+  version?: string;
+  /** Where vitals.jsonl goes (default: next to dataFile; none means memory only). */
+  vitalsDir?: string;
+  vitalsPerIpPerHour?: number;
+  vitalsGlobalPerDay?: number;
+  vitalsMaxFileBytes?: number;
   log?: (msg: string) => void;
 }
 
@@ -105,6 +114,7 @@ export function createApp(opts: AppOptions = {}) {
   const maxSocketsPerIp = opts.maxSocketsPerIp ?? 200; // generous: whole offices share one public IP behind NAT
   const maxSocketsPerClient = opts.maxSocketsPerClient ?? 5;
   const lookupsPerIp = opts.lookupsPerIpPerMinute ?? 60;
+  const version = opts.version ?? 'dev';
   const joinDeadlineMs = opts.joinDeadlineMs ?? 10_000;
   const abuseKickThreshold = opts.abuseKickThreshold ?? 50;
   const saveDebounceMs = opts.saveDebounceMs ?? 2000;
@@ -222,6 +232,15 @@ export function createApp(opts: AppOptions = {}) {
     globalLimitPerDay: opts.feedbackGlobalLimitPerDay,
   });
   feedback.start(opts.feedbackTickMs);
+
+  const vitals = createVitals({
+    dir: opts.vitalsDir ?? (opts.dataFile ? dirname(opts.dataFile) : undefined),
+    perIpPerHour: opts.vitalsPerIpPerHour,
+    globalPerDay: opts.vitalsGlobalPerDay,
+    maxFileBytes: opts.vitalsMaxFileBytes,
+    now: clock,
+    log,
+  });
 
   // ---------- messaging ----------
   function send(ws: WebSocket, msg: ServerMsg) {
@@ -541,22 +560,74 @@ export function createApp(opts: AppOptions = {}) {
       parsed = JSON.parse(await readBody(req, FEEDBACK_LIMITS.bodyMax));
     } catch (err) {
       if (res.headersSent) return;
-      if (err instanceof BodyTooLarge) {
-        json(res, 413, { error: 'Request body too large.' }, { Connection: 'close' });
-        res.once('finish', () => {
-          const t = setTimeout(() => req.destroy(), 2000);
-          t.unref();
-          req.once('close', () => clearTimeout(t));
-        });
-        return;
-      }
+      if (err instanceof BodyTooLarge) return tooLarge(req, res);
       return json(res, 400, { error: 'Invalid request body.' });
     }
     const result = feedback.submit(parsed, clientIp(req));
     json(res, result.status, result.body);
   }
 
+  function tooLarge(req: IncomingMessage, res: ServerResponse) {
+    json(res, 413, { error: 'Request body too large.' }, { Connection: 'close' });
+    res.once('finish', () => {
+      const t = setTimeout(() => req.destroy(), 2000);
+      t.unref();
+      req.once('close', () => clearTimeout(t));
+    });
+  }
+
+  /** Real-user timing beacon (see shared/vitals.ts). Always answers with no body; the client never reads it. */
+  async function postVitals(req: IncomingMessage, res: ServerResponse) {
+    let parsed: unknown;
+    try {
+      // sendBeacon posts a string as text/plain, so the content type is deliberately not checked.
+      parsed = JSON.parse(await readBody(req, MAX_BEACON_BYTES));
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err instanceof BodyTooLarge) return tooLarge(req, res);
+      return json(res, 400, { error: 'Invalid request body.' });
+    }
+    const result = vitals.submit(parsed, clientIp(req));
+    if (result === 'bad') return json(res, 400, { error: 'Invalid request body.' });
+    if (result === 'limit') return json(res, 429, { error: 'Too many requests.' }, { 'Retry-After': '3600' });
+    res.writeHead(204, { 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
+    res.end();
+  }
+
   const staticRoot = opts.staticDir ? resolve(opts.staticDir) : null;
+
+  // The built index.html, re-read only when the file changes, plus the Link preload header derived from it.
+  let shell: { mtimeMs: number; text: string; link: string } | null = null;
+  function readShell(file: string, st: Stats) {
+    if (shell?.mtimeMs === st.mtimeMs) return shell;
+    const text = readFileSync(file, 'utf8');
+    const hints: string[] = [];
+    for (const m of text.matchAll(/<link[^>]*rel="stylesheet"[^>]*href="(\/assets\/[^"]+)"/g)) hints.push(`<${m[1]}>; rel=preload; as=style; crossorigin`);
+    for (const m of text.matchAll(/<script[^>]*type="module"[^>]*src="(\/assets\/[^"]+)"/g)) hints.push(`<${m[1]}>; rel=modulepreload; crossorigin`);
+    return (shell = { mtimeMs: st.mtimeMs, text, link: hints.join(', ') });
+  }
+
+  /** JSON for a `<script type="application/json">`: `<` is escaped so no content can close the tag or open a comment. */
+  const inlineJson = (v: unknown) => JSON.stringify(v).replace(/</g, '\\u003c');
+
+  /** Weak validators from size + mtime: enough for 304s, and stable across restarts of the same build. */
+  function validators(st: Stats) {
+    return { etag: `W/"${st.size.toString(16)}-${Math.round(st.mtimeMs).toString(16)}"`, lastModified: st.mtime.toUTCString() };
+  }
+
+  function notModified(req: IncomingMessage, v: { etag: string; lastModified: string }, st: Stats): boolean {
+    const inm = req.headers['if-none-match'];
+    if (typeof inm === 'string') {
+      const strip = (t: string) => t.trim().replace(/^W\//, '');
+      return inm.trim() === '*' || inm.split(',').some((t) => strip(t) === strip(v.etag));
+    }
+    const ims = req.headers['if-modified-since'];
+    if (typeof ims === 'string') {
+      const t = Date.parse(ims);
+      return Number.isFinite(t) && Math.floor(st.mtimeMs / 1000) * 1000 <= t;
+    }
+    return false;
+  }
 
   function serveStatic(req: IncomingMessage, res: ServerResponse) {
     if (!staticRoot) return json(res, 404, { error: 'Not found' });
@@ -569,15 +640,50 @@ export function createApp(opts: AppOptions = {}) {
     if (urlPath.includes('\0')) return json(res, 400, { error: 'Bad path' });
     let file = normalize(join(staticRoot, urlPath));
     if (file !== staticRoot && !file.startsWith(staticRoot + sep)) return json(res, 400, { error: 'Bad path' });
-    const isAsset = existsSync(file) && statSync(file).isFile();
-    if (!isAsset) file = join(staticRoot, 'index.html'); // SPA fallback (/r/<id>, etc.)
-    if (!existsSync(file)) return json(res, 404, { error: 'Not found' });
+    let st = existsSync(file) ? statSync(file) : null;
+    const isAsset = !!st?.isFile();
+    if (!isAsset) {
+      file = join(staticRoot, 'index.html'); // SPA fallback (/r/<id>, etc.)
+      if (!existsSync(file)) return json(res, 404, { error: 'Not found' });
+      st = statSync(file);
+    }
+    if (!st) return json(res, 404, { error: 'Not found' });
     const hashed = isAsset && urlPath.startsWith('/assets/');
-    res.writeHead(200, {
+    const isHtml = extname(file) === '.html';
+    const base = {
       'Content-Type': MIME[extname(file)] ?? 'application/octet-stream',
       'Cache-Control': hashed ? 'public, max-age=31536000, immutable' : 'no-cache',
       ...SECURITY_HEADERS,
-    });
+    };
+
+    // An invite link ships the room lookup inside the HTML, saving the client a round trip. It counts against the
+    // same per-IP budget as GET /api/rooms/:id; if that is spent, the plain shell goes out and the client fetches.
+    const invite = isHtml && req.method === 'GET' ? /^\/r\/([^/]+)\/?$/.exec(urlPath) : null;
+    if (invite && ROOM_ID.test(invite[1]!)) {
+      const now = clock();
+      const info = lookupBody(invite[1]!, now);
+      if (info && takeLookup(clientIp(req), now)) {
+        const sh = readShell(file, st);
+        const tag = `<script type="application/json" id="room-lookup">${inlineJson(info)}</script>`;
+        const html = sh.text.includes('</body>') ? sh.text.replace('</body>', () => `${tag}</body>`) : sh.text + tag;
+        const buf = Buffer.from(html, 'utf8');
+        // Per-room, per-moment content: never cacheable by a browser or a shared cache (Cloudflare), and no validators.
+        res.writeHead(200, { ...base, 'Cache-Control': 'private, no-store', 'Content-Length': buf.length, ...(sh.link ? { Link: sh.link } : {}) });
+        return res.end(buf);
+      }
+    }
+
+    const v = validators(st);
+    const headers: Record<string, string> = { ...base, ETag: v.etag, 'Last-Modified': v.lastModified };
+    if (isHtml) {
+      const link = readShell(file, st).link;
+      if (link) headers.Link = link;
+    }
+    if (notModified(req, v, st)) {
+      res.writeHead(304, headers);
+      return res.end();
+    }
+    res.writeHead(200, { ...headers, 'Content-Length': st.size });
     if (req.method === 'HEAD') return res.end();
     createReadStream(file)
       .on('error', () => res.destroy())
@@ -599,27 +705,37 @@ export function createApp(opts: AppOptions = {}) {
    * returns only what joining would show anyway (story, head-count, deck), never a vote, and is rate-limited per
    * IP so it cannot enumerate ids faster than joining could.
    */
-  function lookupRoom(req: IncomingMessage, res: ServerResponse, id: string) {
-    const now = clock();
-    if (!takeLookup(clientIp(req), now)) return json(res, 429, { error: 'Too many requests. Try again in a minute.' }, { 'Retry-After': '60' });
-    const room = ROOM_ID.test(id) ? rooms.get(id) : undefined;
+  function lookupBody(id: string, now: number): RoomLookup | null {
+    if (!ROOM_ID.test(id)) return null;
+    const room = rooms.get(id);
     if (room) {
       let players = 0;
       for (const p of room.participants.values()) if (!p.spectator && p.connections > 0) players++;
-      const body: RoomLookup = { status: 'live', story: room.story, players, deckLabel: deckLabel(room.deckId) };
-      return json(res, 200, body);
+      return { status: 'live', story: room.story, players, deckLabel: deckLabel(room.deckId) };
     }
-    const tomb = ROOM_ID.test(id) ? tombstones.get(id) : undefined;
-    if (tomb && !tombstoneExpired(tomb, now)) {
-      const body: RoomLookup = { status: 'revivable', deckLabel: deckLabel(tomb.deckId) };
-      return json(res, 200, body);
-    }
+    const tomb = tombstones.get(id);
+    if (tomb && !tombstoneExpired(tomb, now)) return { status: 'revivable', deckLabel: deckLabel(tomb.deckId) };
+    return null;
+  }
+
+  function lookupRoom(req: IncomingMessage, res: ServerResponse, id: string) {
+    const now = clock();
+    if (!takeLookup(clientIp(req), now)) return json(res, 429, { error: 'Too many requests. Try again in a minute.' }, { 'Retry-After': '60' });
+    const body = lookupBody(id, now);
+    if (body) return json(res, 200, body);
     json(res, 404, { error: 'Room not found' });
   }
 
   function route(req: IncomingMessage, res: ServerResponse) {
     const path = (req.url ?? '/').split('?')[0] ?? '/';
-    if (path === '/healthz') return json(res, 200, { ok: true, rooms: rooms.size, connections: conns.size });
+    if (path === '/healthz') return json(res, 200, { ok: true, version, rooms: rooms.size, connections: conns.size });
+    if (path === '/api/vitals' && req.method === 'POST') {
+      postVitals(req, res).catch((err) => {
+        log(`postVitals failed: ${(err as Error).message}`);
+        if (!res.headersSent) json(res, 500, { error: 'Internal error' });
+      });
+      return;
+    }
     if (path === '/api/rooms' && req.method === 'POST') {
       createRoom(req, res).catch((err) => {
         log(`createRoom failed: ${(err as Error).message}`);
@@ -758,6 +874,7 @@ export function createApp(opts: AppOptions = {}) {
         markDirty();
       }
     }
+    vitals.sweep();
     for (const [ip, times] of lookupsByIp) {
       const keep = times.filter((t) => now - t < 60_000);
       if (keep.length) lookupsByIp.set(ip, keep);
@@ -798,5 +915,5 @@ export function createApp(opts: AppOptions = {}) {
     }
   }
 
-  return { server, rooms, tombstones, close, save, sweep, feedback };
+  return { server, rooms, tombstones, close, save, sweep, feedback, vitals };
 }
