@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Room, RoomError, randomId } from '../server/room.ts';
+import { Room, RoomError, isTombstone, randomId } from '../server/room.ts';
 
 const A = 'client-a-000000000000';
 const B = 'client-b-000000000000';
@@ -132,5 +132,77 @@ describe('Room', () => {
     expect(restored.view(A).participants[0]).toMatchObject({ name: 'Alice', vote: '5', connected: false });
     restored.join(A, 'Alice', false);
     expect(restored.view(A).participants[0]!.connected).toBe(true);
+  });
+
+  describe('fresh start after a gap', () => {
+    const HOUR = 3600_000;
+    const STALE = 4 * HOUR;
+
+    function idleRoom() {
+      const r = room3();
+      r.setStory('Old story');
+      r.vote(A, '5');
+      r.reveal(100);
+      r.setTimer(60, 100);
+      for (const id of [A, B, C]) r.leave(id, 1000);
+      return r;
+    }
+
+    it('resets the round and drops offline seats when the first person returns after 4h', () => {
+      const r = idleRoom();
+      r.join(B, 'Bob', false, 1000 + STALE, STALE);
+      expect(r.round).toBe(2);
+      expect(r.revealed).toBe(false);
+      expect(r.timer).toBeNull();
+      expect([...r.participants.keys()]).toEqual([B]);
+      expect(r.view(B).participants[0]).toMatchObject({ name: 'Bob', voted: false, connected: true });
+      expect(r.story).toBe('Old story');
+    });
+
+    it('leaves the room alone for a shorter gap', () => {
+      const r = idleRoom();
+      r.join(B, 'Bob', false, 1000 + STALE - 1, STALE);
+      expect(r.round).toBe(1);
+      expect(r.revealed).toBe(true);
+      expect(r.participants.size).toBe(3);
+      expect(r.view(B).participants.find((p) => p.name === 'Alice')!.vote).toBe('5');
+    });
+
+    it('never resets while somebody is connected, however old the last activity', () => {
+      const r = room3();
+      r.join(A, 'Alice', false, 100 * STALE, STALE); // second tab
+      expect(r.round).toBe(1);
+      expect(r.participants.size).toBe(3);
+      // B joins late too, but A is still connected
+      r.join(B, 'Bob', false, 100 * STALE, STALE);
+      expect(r.round).toBe(1);
+    });
+  });
+
+  it('turns into a tombstone and revives with the same id and deck but fresh state', () => {
+    const r = room3();
+    r.setDeck('custom', ['S', 'M', 'L']);
+    r.setStory('Old');
+    r.vote(A, 'M');
+    const t = JSON.parse(JSON.stringify(r.tombstone()));
+    expect(t).toEqual({ id: 'Room123456', deckId: 'custom', cards: ['S', 'M', 'L'], lastActivity: r.lastActivity });
+    expect(isTombstone(t)).toBe(true);
+    const revived = Room.revive(t, 5000);
+    expect(revived.id).toBe('Room123456');
+    expect(revived.deckId).toBe('custom');
+    expect(revived.cards).toEqual(['S', 'M', 'L']);
+    expect(revived.story).toBe('');
+    expect(revived.round).toBe(1);
+    expect(revived.participants.size).toBe(0);
+    expect(revived.lastActivity).toBe(5000);
+  });
+
+  it('validates tombstones and snapshots', () => {
+    expect(isTombstone(null)).toBe(false);
+    expect(isTombstone({ id: 'x', deckId: 'nope', cards: ['1', '2'], lastActivity: 1 })).toBe(false);
+    expect(isTombstone({ id: 'x', deckId: 'fibonacci', cards: 'no', lastActivity: 1 })).toBe(false);
+    expect(isTombstone({ id: 'x', deckId: 'fibonacci', cards: ['1', '2'], lastActivity: NaN })).toBe(false);
+    expect(() => Room.restore({ id: 5 } as never)).toThrow('malformed');
+    expect(() => Room.restore(null as never)).toThrow('malformed');
   });
 });

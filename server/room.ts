@@ -62,6 +62,32 @@ export interface RoomSnapshot {
   participants: [string, Omit<Participant, 'connections' | 'disconnectedAt'>][];
 }
 
+/** What survives after a room expires: enough to revive the same link with the same deck. */
+export interface Tombstone {
+  id: string;
+  deckId: DeckId;
+  cards: string[];
+  lastActivity: number;
+}
+
+/** True if `deckId` is a known deck and `cards` is a plausible card list. */
+export function isDeck(deckId: unknown, cards: unknown): boolean {
+  return (
+    typeof deckId === 'string' &&
+    (deckId === 'custom' || Object.hasOwn(DECKS, deckId)) &&
+    Array.isArray(cards) &&
+    cards.length >= 2 &&
+    cards.length <= 32 &&
+    cards.every((c) => typeof c === 'string' && c.length > 0 && c.length <= 16)
+  );
+}
+
+export function isTombstone(t: unknown): t is Tombstone {
+  if (!t || typeof t !== 'object') return false;
+  const o = t as Record<string, unknown>;
+  return typeof o.id === 'string' && isDeck(o.deckId, o.cards) && typeof o.lastActivity === 'number' && Number.isFinite(o.lastActivity);
+}
+
 export class Room {
   readonly id: string;
   story = '';
@@ -89,7 +115,16 @@ export class Room {
     return n;
   }
 
-  join(clientId: string, rawName: string, spectator: boolean, now = Date.now()): Participant {
+  /**
+   * Adds (or re-attaches) a participant. If nobody is connected and the room has been idle for at least
+   * `staleAfterMs`, the round is reset first and every offline seat is dropped, so the first person back
+   * after a long gap starts clean.
+   */
+  join(clientId: string, rawName: string, spectator: boolean, now = Date.now(), staleAfterMs = Infinity): Participant {
+    if (this.connectedCount === 0 && now - this.lastActivity >= staleAfterMs) {
+      this.reset(now);
+      this.participants.clear();
+    }
     const name = cleanText(rawName, LIMITS.nameLength) || 'Anonymous';
     let p = this.participants.get(clientId);
     if (!p) {
@@ -131,6 +166,18 @@ export class Room {
 
   isExpired(now: number, ttlMs: number): boolean {
     return this.connectedCount === 0 && now - this.lastActivity > ttlMs;
+  }
+
+  tombstone(): Tombstone {
+    return { id: this.id, deckId: this.deckId, cards: [...this.cards], lastActivity: this.lastActivity };
+  }
+
+  /** A fresh room (new story and round) under the tombstone's id, with its deck. */
+  static revive(t: Tombstone, now = Date.now()): Room {
+    const room = new Room(t.id, now);
+    room.deckId = t.deckId;
+    room.cards = [...t.cards];
+    return room;
   }
 
   vote(clientId: string, value: string | null, now = Date.now()): boolean {
@@ -253,6 +300,9 @@ export class Room {
 
   /** Restores a room after a restart. Everyone starts disconnected and gets the usual grace period to reconnect. */
   static restore(s: RoomSnapshot, now = Date.now()): Room {
+    if (!s || typeof s !== 'object' || typeof s.id !== 'string' || !isDeck(s.deckId, s.cards) || !Array.isArray(s.participants)) {
+      throw new Error('malformed room snapshot');
+    }
     const room = new Room(s.id, s.lastActivity);
     room.story = s.story;
     room.deckId = s.deckId;
