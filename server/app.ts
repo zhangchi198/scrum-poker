@@ -1,8 +1,10 @@
 import { createReadStream, existsSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { extname, join, normalize, resolve, sep } from 'node:path';
+import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DECK_IDS, REACTIONS, type ClientMsg, type ServerMsg } from '../shared/protocol.ts';
+import { FEEDBACK_LIMITS } from '../shared/feedback.ts';
+import { createFeedback, mailConfigFromEnv, type MailConfig, type MailTransport } from './feedback.ts';
 import { Room, RoomError, isTombstone, randomId, type RoomSnapshot, type Tombstone } from './room.ts';
 
 export interface AppOptions {
@@ -28,6 +30,16 @@ export interface AppOptions {
   saveDebounceMs?: number;
   /** Clock override, for tests. */
   now?: () => number;
+  /** Feedback storage directory (default: next to dataFile; none means memory only). */
+  feedbackDir?: string;
+  /** SMTP config for the feedback digest (default: from the SMTP_ and FEEDBACK_ env vars; null disables email). */
+  feedbackMail?: MailConfig | null;
+  /** Replaces the SMTP transport, for tests. */
+  feedbackTransport?: MailTransport;
+  feedbackIpLimitPerHour?: number;
+  feedbackGlobalLimitPerDay?: number;
+  /** How often to retry/check for a due digest (default 10 minutes). */
+  feedbackTickMs?: number;
   log?: (msg: string) => void;
 }
 
@@ -195,6 +207,17 @@ export function createApp(opts: AppOptions = {}) {
   }
 
   load();
+
+  const feedback = createFeedback({
+    dir: opts.feedbackDir ?? (opts.dataFile ? dirname(opts.dataFile) : undefined),
+    mail: opts.feedbackMail === undefined ? mailConfigFromEnv(process.env) : opts.feedbackMail,
+    transport: opts.feedbackTransport,
+    now: clock,
+    log,
+    ipLimitPerHour: opts.feedbackIpLimitPerHour,
+    globalLimitPerDay: opts.feedbackGlobalLimitPerDay,
+  });
+  feedback.start(opts.feedbackTickMs);
 
   // ---------- messaging ----------
   function send(ws: WebSocket, msg: ServerMsg) {
@@ -450,6 +473,27 @@ export function createApp(opts: AppOptions = {}) {
     json(res, 201, { id });
   }
 
+  async function postFeedback(req: IncomingMessage, res: ServerResponse) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readBody(req, FEEDBACK_LIMITS.bodyMax));
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err instanceof BodyTooLarge) {
+        json(res, 413, { error: 'Request body too large.' }, { Connection: 'close' });
+        res.once('finish', () => {
+          const t = setTimeout(() => req.destroy(), 2000);
+          t.unref();
+          req.once('close', () => clearTimeout(t));
+        });
+        return;
+      }
+      return json(res, 400, { error: 'Invalid request body.' });
+    }
+    const result = feedback.submit(parsed, clientIp(req));
+    json(res, result.status, result.body);
+  }
+
   const staticRoot = opts.staticDir ? resolve(opts.staticDir) : null;
 
   function serveStatic(req: IncomingMessage, res: ServerResponse) {
@@ -494,6 +538,13 @@ export function createApp(opts: AppOptions = {}) {
     if (path === '/api/rooms' && req.method === 'POST') {
       createRoom(req, res).catch((err) => {
         log(`createRoom failed: ${(err as Error).message}`);
+        if (!res.headersSent) json(res, 500, { error: 'Internal error' });
+      });
+      return;
+    }
+    if (path === '/api/feedback' && req.method === 'POST') {
+      postFeedback(req, res).catch((err) => {
+        log(`postFeedback failed: ${(err as Error).message}`);
         if (!res.headersSent) json(res, 500, { error: 'Internal error' });
       });
       return;
@@ -637,6 +688,7 @@ export function createApp(opts: AppOptions = {}) {
     clearInterval(heartbeat);
     clearInterval(sweeper);
     clearInterval(saver);
+    feedback.stop();
     if (saveTimer) clearTimeout(saveTimer);
     for (const c of conns) c.ws.close(1012, 'Server restarting');
     wss.close();
@@ -651,5 +703,5 @@ export function createApp(opts: AppOptions = {}) {
     }
   }
 
-  return { server, rooms, tombstones, close, save, sweep };
+  return { server, rooms, tombstones, close, save, sweep, feedback };
 }

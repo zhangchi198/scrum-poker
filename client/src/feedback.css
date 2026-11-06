@@ -1,0 +1,78 @@
+/* Feedback dialog. Reuses .settings-dialog, .field, .btn and the theme tokens from styles.css. */
+.feedback-dialog textarea {
+  font: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  width: 100%;
+  min-height: 7.5em;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.feedback-dialog textarea:focus-visible,
+.feedback-dialog input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.feedback-dialog .field > span[aria-hidden] {
+  margin-bottom: 0;
+}
+.feedback-dialog .field > label > span {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.feedback-dialog .dialog-actions {
+  justify-content: flex-end;
+}
+.seg {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.seg button {
+  appearance: none;
+  flex: 1;
+  min-height: 40px;
+  border: 0;
+  border-right: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.seg button:last-child {
+  border-right: 0;
+}
+.seg button.on {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.seg button:focus-visible {
+  outline-offset: -3px;
+}
+.counter {
+  justify-self: end;
+  color: var(--muted);
+}
+.counter.full {
+  color: var(--danger);
+  font-weight: 600;
+}
+.feedback-dialog .muted {
+  margin: 0 0 8px;
+}
+.settings-feedback {
+  margin: 10px 0 0;
+  text-align: center;
+}
+@media (max-width: 720px), (max-height: 500px), (pointer: coarse) {
+  .seg button,
+  .feedback-dialog input {
+    min-height: 44px;
+  }
+}
