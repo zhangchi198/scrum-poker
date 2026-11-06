@@ -3,28 +3,47 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { DECK_IDS, REACTIONS, type ClientMsg, type ServerMsg } from '../shared/protocol.ts';
-import { Room, RoomError, randomId, type RoomSnapshot } from './room.ts';
+import { Room, RoomError, isTombstone, randomId, type RoomSnapshot, type Tombstone } from './room.ts';
 
 export interface AppOptions {
   staticDir?: string;
   dataFile?: string;
   /** How long an offline participant keeps their seat (and vote). */
   graceMs?: number;
-  /** How long an empty room survives without activity. */
+  /** How long an empty room keeps its full state without activity (default 30 days). */
   roomTtlMs?: number;
+  /** After a room expires, its link can be revived for this long since its last activity (default 90 days). */
+  tombstoneTtlMs?: number;
+  /** An empty room idle at least this long starts a fresh round when someone joins (default 4 hours). */
+  staleAfterMs?: number;
   maxRooms?: number;
   roomsPerIpPerHour?: number;
+  maxSocketsPerIp?: number;
+  maxSocketsPerClient?: number;
+  /** A socket must send a valid join within this long or it is closed (code 4000). */
+  joinDeadlineMs?: number;
+  /** Close a socket (1008) after this many rate-limit rejections within 10 seconds. */
+  abuseKickThreshold?: number;
+  /** Save this long after the last change. */
+  saveDebounceMs?: number;
+  /** Clock override, for tests. */
+  now?: () => number;
   log?: (msg: string) => void;
 }
 
 interface Conn {
   ws: WebSocket;
+  ip: string;
   room: Room | null;
   clientId: string | null;
   alive: boolean;
   tokens: number;
   lastRefill: number;
   lastReactionAt: number;
+  joinTimer: NodeJS.Timeout | null;
+  strikes: number;
+  strikeWindowStart: number;
+  kicked: boolean;
 }
 
 const MIME: Record<string, string> = {
@@ -46,6 +65,10 @@ const SECURITY_HEADERS = {
   // Room URLs are the only "secret" in this app, so never leak them via Referer.
   'Referrer-Policy': 'no-referrer',
   'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  // No includeSubDomains: other subdomains of this domain are not served by this app.
+  'Strict-Transport-Security': 'max-age=31536000',
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Resource-Policy': 'same-origin',
 };
 
 const ROOM_ID = /^[1-9A-HJ-NP-Za-km-z]{10}$/;
@@ -53,41 +76,122 @@ const BUCKET_SIZE = 30;
 const REFILL_PER_SEC = 10;
 const NUDGE_COOLDOWN_MS = 10_000;
 const REACTION_COOLDOWN_MS = 250;
+const ABUSE_WINDOW_MS = 10_000;
+const DAY = 24 * 3600_000;
+
+class BodyTooLarge extends Error {}
 
 export function createApp(opts: AppOptions = {}) {
   const graceMs = opts.graceMs ?? 90_000;
-  const roomTtlMs = opts.roomTtlMs ?? 24 * 3600_000;
-  const maxRooms = opts.maxRooms ?? 2000;
+  const roomTtlMs = opts.roomTtlMs ?? 30 * DAY;
+  const tombstoneTtlMs = opts.tombstoneTtlMs ?? 90 * DAY;
+  const staleAfterMs = opts.staleAfterMs ?? 4 * 3600_000;
+  const maxRooms = opts.maxRooms ?? 10_000;
   const roomsPerIp = opts.roomsPerIpPerHour ?? 30;
+  const maxSocketsPerIp = opts.maxSocketsPerIp ?? 50;
+  const maxSocketsPerClient = opts.maxSocketsPerClient ?? 5;
+  const joinDeadlineMs = opts.joinDeadlineMs ?? 10_000;
+  const abuseKickThreshold = opts.abuseKickThreshold ?? 50;
+  const saveDebounceMs = opts.saveDebounceMs ?? 2000;
+  const clock = opts.now ?? Date.now;
   const log = opts.log ?? ((m: string) => console.log(`[poker] ${m}`));
 
   const rooms = new Map<string, Room>();
+  const tombstones = new Map<string, Tombstone>();
   const conns = new Set<Conn>();
   const createdByIp = new Map<string, number[]>();
+  const socketsByIp = new Map<string, number>();
   let dirty = false;
+  let saveTimer: NodeJS.Timeout | null = null;
 
   // ---------- persistence (survives deploys; rooms are otherwise in-memory) ----------
+  function retire(room: Room) {
+    tombstones.set(room.id, room.tombstone());
+  }
+
+  function tombstoneExpired(t: Tombstone, now: number) {
+    return now - t.lastActivity > tombstoneTtlMs;
+  }
+
   function load() {
-    if (!opts.dataFile || !existsSync(opts.dataFile)) return;
+    const file = opts.dataFile;
+    if (!file || !existsSync(file)) return;
+    let rawRooms: unknown[];
+    let rawTombstones: unknown[] = [];
     try {
-      const snaps = JSON.parse(readFileSync(opts.dataFile, 'utf8')) as RoomSnapshot[];
-      const now = Date.now();
-      for (const s of snaps) {
-        const room = Room.restore(s, now);
-        if (!room.isExpired(now, roomTtlMs)) rooms.set(room.id, room);
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      if (Array.isArray(parsed)) {
+        rawRooms = parsed; // legacy format: a plain array of room snapshots
+      } else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { rooms?: unknown }).rooms)) {
+        rawRooms = (parsed as { rooms: unknown[] }).rooms;
+        const t = (parsed as { tombstones?: unknown }).tombstones;
+        if (Array.isArray(t)) rawTombstones = t;
+      } else {
+        throw new Error('unrecognised file format');
       }
-      log(`restored ${rooms.size} room(s)`);
     } catch (err) {
-      log(`could not restore rooms: ${(err as Error).message}`);
+      // Never let the next save silently overwrite a file we could not read.
+      const backup = `${file}.corrupt-${Date.now()}`;
+      try {
+        renameSync(file, backup);
+        log(`ERROR: could not read ${file} (${(err as Error).message}); moved it to ${backup} and starting empty`);
+      } catch (renameErr) {
+        log(`ERROR: could not read ${file} (${(err as Error).message}) and could not move it aside (${(renameErr as Error).message})`);
+      }
+      return;
+    }
+
+    const now = clock();
+    let skipped = 0;
+    for (const s of rawRooms) {
+      try {
+        if (!ROOM_ID.test((s as RoomSnapshot | null)?.id ?? '')) throw new Error('bad room id');
+        const room = Room.restore(s as RoomSnapshot, now);
+        if (room.isExpired(now, roomTtlMs)) retire(room);
+        else rooms.set(room.id, room);
+      } catch (err) {
+        skipped++;
+        log(`ERROR: skipped an unreadable room while restoring: ${(err as Error).message}`);
+      }
+    }
+    for (const t of rawTombstones) {
+      if (isTombstone(t) && ROOM_ID.test(t.id)) {
+        if (!rooms.has(t.id)) tombstones.set(t.id, { id: t.id, deckId: t.deckId, cards: t.cards, lastActivity: t.lastActivity });
+      } else {
+        skipped++;
+        log('ERROR: skipped an unreadable tombstone while restoring');
+      }
+    }
+    for (const [id, t] of tombstones) if (tombstoneExpired(t, now)) tombstones.delete(id);
+    log(`restored ${rooms.size} room(s) and ${tombstones.size} tombstone(s)${skipped ? `, skipped ${skipped} bad entr${skipped === 1 ? 'y' : 'ies'}` : ''}`);
+  }
+
+  /** Writes the data file if anything changed. Returns the number of rooms written, or null if nothing was written. */
+  function save(): number | null {
+    if (!opts.dataFile || !dirty) return null;
+    const tmp = `${opts.dataFile}.tmp`;
+    const snaps = [...rooms.values()].map((r) => r.snapshot());
+    writeFileSync(tmp, JSON.stringify({ version: 2, rooms: snaps, tombstones: [...tombstones.values()] }));
+    renameSync(tmp, opts.dataFile);
+    dirty = false;
+    return snaps.length;
+  }
+
+  function saveQuietly() {
+    try {
+      save();
+    } catch (err) {
+      log(`save failed: ${(err as Error).message}`);
     }
   }
 
-  function save() {
-    if (!opts.dataFile || !dirty) return;
-    const tmp = `${opts.dataFile}.tmp`;
-    writeFileSync(tmp, JSON.stringify([...rooms.values()].map((r) => r.snapshot())));
-    renameSync(tmp, opts.dataFile);
-    dirty = false;
+  /** Marks state as changed and schedules a save shortly after the last change. */
+  function markDirty() {
+    dirty = true;
+    if (!opts.dataFile) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveQuietly, saveDebounceMs);
+    saveTimer.unref();
   }
 
   load();
@@ -97,14 +201,45 @@ export function createApp(opts: AppOptions = {}) {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
   }
 
+  /**
+   * Sends the room state to everyone in it. The per-room work is done once: the shared view carries votes only
+   * after reveal, so before reveal the sole per-socket difference is the viewer's own vote, which is patched into
+   * their own participant entry. Nobody else's vote is ever put in a message before reveal.
+   */
   function broadcastState(room: Room) {
-    dirty = true;
-    const now = Date.now();
-    for (const c of conns) if (c.room === room) send(c.ws, { t: 'state', room: room.view(c.clientId, now) });
+    markDirty();
+    const { participants, ...rest } = room.view(null, clock()); // viewer null: votes are null unless revealed
+    const head = `{"t":"state","room":${JSON.stringify(rest).slice(0, -1)},"participants":[`;
+    const parts = participants.map((p) => JSON.stringify(p));
+    const assemble = (list: string[]) => `${head}${list.join(',')}]}}`;
+    const shared = assemble(parts);
+    const index = new Map<string, number>();
+    let i = 0;
+    for (const cid of room.participants.keys()) index.set(cid, i++);
+    const patchedByClient = new Map<string, string>();
+    for (const c of conns) {
+      if (c.room !== room || c.ws.readyState !== c.ws.OPEN) continue;
+      let out = shared;
+      if (!room.revealed && c.clientId) {
+        const vote = room.participants.get(c.clientId)?.vote;
+        const at = index.get(c.clientId);
+        if (vote !== null && vote !== undefined && at !== undefined) {
+          let patched = patchedByClient.get(c.clientId);
+          if (patched === undefined) {
+            const copy = parts.slice();
+            copy[at] = JSON.stringify({ ...participants[at]!, vote });
+            patched = assemble(copy);
+            patchedByClient.set(c.clientId, patched);
+          }
+          out = patched;
+        }
+      }
+      c.ws.send(out);
+    }
   }
 
   function takeToken(c: Conn): boolean {
-    const now = Date.now();
+    const now = clock();
     c.tokens = Math.min(BUCKET_SIZE, c.tokens + ((now - c.lastRefill) / 1000) * REFILL_PER_SEC);
     c.lastRefill = now;
     if (c.tokens < 1) return false;
@@ -112,20 +247,72 @@ export function createApp(opts: AppOptions = {}) {
     return true;
   }
 
+  /** Called for every message the token bucket turned away. Persistent offenders are disconnected. */
+  function rejectForRate(c: Conn) {
+    const now = clock();
+    if (now - c.strikeWindowStart > ABUSE_WINDOW_MS) {
+      c.strikeWindowStart = now;
+      c.strikes = 0;
+    }
+    c.strikes++;
+    send(c.ws, { t: 'error', code: 'rate_limited', message: 'Slow down a little.' });
+    if (c.strikes >= abuseKickThreshold && !c.kicked) {
+      c.kicked = true;
+      c.ws.close(1008, 'Rate limit exceeded');
+    }
+  }
+
+  /** Reserves one room-creation slot for this IP (shared by POST /api/rooms and revival). */
+  function takeCreationSlot(ip: string, now: number): 'ok' | 'ip' | 'cap' {
+    const recent = (createdByIp.get(ip) ?? []).filter((t) => now - t < 3600_000);
+    if (recent.length >= roomsPerIp) return 'ip';
+    if (rooms.size >= maxRooms) return 'cap';
+    recent.push(now);
+    createdByIp.set(ip, recent);
+    return 'ok';
+  }
+
   function handle(c: Conn, msg: ClientMsg) {
     if (msg.t === 'ping') return send(c.ws, { t: 'pong' });
 
     if (msg.t === 'join') {
       if (c.room) return; // one room per socket
-      const room = typeof msg.roomId === 'string' ? rooms.get(msg.roomId) : undefined;
-      if (!room) return send(c.ws, { t: 'error', code: 'room_not_found', message: 'This room does not exist or has expired.' });
       if (typeof msg.clientId !== 'string' || !/^[\w-]{16,64}$/.test(msg.clientId)) {
         return send(c.ws, { t: 'error', code: 'bad_request', message: 'Invalid client id.' });
       }
-      const p = room.join(msg.clientId, msg.name, msg.spectator === true);
+      const now = clock();
+      const roomId = typeof msg.roomId === 'string' ? msg.roomId : '';
+      let room = rooms.get(roomId);
+      if (room) {
+        let mine = 0;
+        for (const o of conns) if (o.room === room && o.clientId === msg.clientId) mine++;
+        if (mine >= maxSocketsPerClient) {
+          send(c.ws, { t: 'error', code: 'rate_limited', message: 'Too many open tabs for this room.' });
+          c.ws.close(1008, 'Too many connections');
+          return;
+        }
+      } else {
+        const tomb = tombstones.get(roomId);
+        if (tomb && tombstoneExpired(tomb, now)) {
+          tombstones.delete(roomId);
+          markDirty();
+        } else if (tomb) {
+          // Reviving a room counts as creating one: same per-IP limit and the same capacity cap.
+          const slot = takeCreationSlot(c.ip, now);
+          if (slot === 'ip') return send(c.ws, { t: 'error', code: 'rate_limited', message: 'Too many rooms opened from your network. Try again later.' });
+          if (slot === 'cap') return send(c.ws, { t: 'error', code: 'rate_limited', message: 'The server is at capacity. Try again later.' });
+          room = Room.revive(tomb, now);
+          rooms.set(room.id, room);
+          tombstones.delete(room.id);
+        }
+      }
+      if (!room) return send(c.ws, { t: 'error', code: 'room_not_found', message: 'This room does not exist or has expired.' });
+      const p = room.join(msg.clientId, msg.name, msg.spectator === true, now, staleAfterMs);
       c.room = room;
       c.clientId = msg.clientId;
-      send(c.ws, { t: 'welcome', you: p.publicId, room: room.view(c.clientId) });
+      if (c.joinTimer) clearTimeout(c.joinTimer);
+      c.joinTimer = null;
+      send(c.ws, { t: 'welcome', you: p.publicId, room: room.view(c.clientId, now) });
       return broadcastState(room);
     }
 
@@ -137,28 +324,28 @@ export function createApp(opts: AppOptions = {}) {
 
     switch (msg.t) {
       case 'vote':
-        if (room.vote(clientId, msg.value ?? null)) broadcastState(room);
+        if (room.vote(clientId, msg.value ?? null, clock())) broadcastState(room);
         return;
       case 'reveal':
-        if (room.reveal()) broadcastState(room);
+        if (room.reveal(clock())) broadcastState(room);
         return;
       case 'reset':
-        room.reset();
+        room.reset(clock());
         return broadcastState(room);
       case 'story':
-        if (room.setStory(msg.story)) broadcastState(room);
+        if (room.setStory(msg.story, clock())) broadcastState(room);
         return;
       case 'deck':
-        room.setDeck(msg.deckId, msg.custom);
+        room.setDeck(msg.deckId, msg.custom, clock());
         return broadcastState(room);
       case 'profile':
-        if (room.setProfile(clientId, msg.name, msg.spectator)) broadcastState(room);
+        if (room.setProfile(clientId, msg.name, msg.spectator, clock())) broadcastState(room);
         return;
       case 'timer':
-        room.setTimer(msg.seconds);
+        room.setTimer(msg.seconds, clock());
         return broadcastState(room);
       case 'react': {
-        const now = Date.now();
+        const now = clock();
         if (!(REACTIONS as readonly string[]).includes(msg.emoji)) return;
         if (now - c.lastReactionAt < REACTION_COOLDOWN_MS) return;
         c.lastReactionAt = now;
@@ -166,7 +353,7 @@ export function createApp(opts: AppOptions = {}) {
         return;
       }
       case 'nudge': {
-        const now = Date.now();
+        const now = clock();
         if (room.revealed) return;
         if (now - room.lastNudgeAt < NUDGE_COOLDOWN_MS) {
           return send(c.ws, { t: 'error', code: 'rate_limited', message: 'Give them a few seconds before nudging again.' });
@@ -183,25 +370,34 @@ export function createApp(opts: AppOptions = {}) {
   }
 
   // ---------- HTTP ----------
+  /**
+   * The client IP. `CF-Connecting-IP` is trusted verbatim, which is safe only because port 3000 is bound to
+   * loopback and reachable solely through cloudflared (see README).
+   */
   function clientIp(req: IncomingMessage): string {
     const cf = req.headers['cf-connecting-ip'];
     return (typeof cf === 'string' && cf) || req.socket.remoteAddress || 'unknown';
   }
 
-  function json(res: ServerResponse, status: number, body: unknown) {
-    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
+  function json(res: ServerResponse, status: number, body: unknown, extra: Record<string, string> = {}) {
+    res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', ...SECURITY_HEADERS, ...extra });
     res.end(JSON.stringify(body));
   }
 
   function readBody(req: IncomingMessage, limit = 2048): Promise<string> {
     return new Promise((ok, fail) => {
       let size = 0;
+      let over = false;
       const chunks: Buffer[] = [];
       req.on('data', (chunk: Buffer) => {
         size += chunk.length;
-        if (size > limit) {
-          fail(new Error('too large'));
-          req.destroy();
+        if (over) {
+          // Keep draining so the 413 isn't lost to a connection reset; give up on absurd uploads.
+          if (size > 1_000_000) req.destroy();
+        } else if (size > limit) {
+          over = true;
+          chunks.length = 0;
+          fail(new BodyTooLarge());
         } else chunks.push(chunk);
       });
       req.on('end', () => ok(Buffer.concat(chunks).toString('utf8')));
@@ -211,13 +407,11 @@ export function createApp(opts: AppOptions = {}) {
 
   async function createRoom(req: IncomingMessage, res: ServerResponse) {
     const ip = clientIp(req);
-    const now = Date.now();
-    const recent = (createdByIp.get(ip) ?? []).filter((t) => now - t < 3600_000);
-    if (recent.length >= roomsPerIp) return json(res, 429, { error: 'Too many rooms created. Try again later.' });
-    if (rooms.size >= maxRooms) return json(res, 503, { error: 'The server is at capacity. Try again later.' });
+    const now = clock();
     // Reserve the slot before awaiting the body, so slow concurrent requests can't all pass the check.
-    recent.push(now);
-    createdByIp.set(ip, recent);
+    const slot = takeCreationSlot(ip, now);
+    if (slot === 'ip') return json(res, 429, { error: 'Too many rooms created. Try again later.' });
+    if (slot === 'cap') return json(res, 503, { error: 'The server is at capacity. Try again later.' });
 
     let body: { deckId?: unknown; custom?: unknown } = {};
     try {
@@ -225,13 +419,24 @@ export function createApp(opts: AppOptions = {}) {
       const parsed: unknown = raw ? JSON.parse(raw) : {};
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('shape');
       body = parsed;
-    } catch {
-      if (!res.headersSent) json(res, 400, { error: 'Invalid request body.' });
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err instanceof BodyTooLarge) {
+        json(res, 413, { error: 'Request body too large.' }, { Connection: 'close' });
+        // Only cut the connection once the response is out, and not if the client never finishes uploading.
+        res.once('finish', () => {
+          const t = setTimeout(() => req.destroy(), 2000);
+          t.unref();
+          req.once('close', () => clearTimeout(t));
+        });
+        return;
+      }
+      json(res, 400, { error: 'Invalid request body.' });
       return;
     }
 
     let id = randomId(10);
-    while (rooms.has(id)) id = randomId(10);
+    while (rooms.has(id) || tombstones.has(id)) id = randomId(10);
     const room = new Room(id, now);
     const deckId = body.deckId ?? 'fibonacci';
     if (!(DECK_IDS as readonly unknown[]).includes(deckId)) return json(res, 400, { error: 'Unknown deck.' });
@@ -241,7 +446,7 @@ export function createApp(opts: AppOptions = {}) {
       return json(res, 400, { error: (err as Error).message });
     }
     rooms.set(id, room);
-    dirty = true;
+    markDirty();
     json(res, 201, { id });
   }
 
@@ -317,17 +522,47 @@ export function createApp(opts: AppOptions = {}) {
       socket.destroy();
       return;
     }
+    const ip = clientIp(req);
+    const open = socketsByIp.get(ip) ?? 0;
+    if (open >= maxSocketsPerIp) {
+      socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+    // Count from the upgrade until the TCP socket closes, so a burst of upgrades can't slip past the cap.
+    socketsByIp.set(ip, open + 1);
+    socket.once('close', () => {
+      const n = (socketsByIp.get(ip) ?? 1) - 1;
+      if (n > 0) socketsByIp.set(ip, n);
+      else socketsByIp.delete(ip);
+    });
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
 
-  wss.on('connection', (ws: WebSocket) => {
-    const c: Conn = { ws, room: null, clientId: null, alive: true, tokens: BUCKET_SIZE, lastRefill: Date.now(), lastReactionAt: 0 };
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    const c: Conn = {
+      ws,
+      ip: clientIp(req),
+      room: null,
+      clientId: null,
+      alive: true,
+      tokens: BUCKET_SIZE,
+      lastRefill: clock(),
+      lastReactionAt: 0,
+      joinTimer: null,
+      strikes: 0,
+      strikeWindowStart: clock(),
+      kicked: false,
+    };
     conns.add(c);
+    c.joinTimer = setTimeout(() => ws.close(4000, 'No join received'), joinDeadlineMs);
+    c.joinTimer.unref();
     ws.on('pong', () => (c.alive = true));
     ws.on('message', (data, isBinary) => {
       c.alive = true;
+      if (c.kicked) return;
+      // Every frame costs a token, binary ones included (we ignore their content).
+      if (!takeToken(c)) return rejectForRate(c);
       if (isBinary) return;
-      if (!takeToken(c)) return send(ws, { t: 'error', code: 'rate_limited', message: 'Slow down a little.' });
       let msg: ClientMsg;
       try {
         msg = JSON.parse(data.toString());
@@ -344,9 +579,10 @@ export function createApp(opts: AppOptions = {}) {
       }
     });
     ws.on('close', () => {
+      if (c.joinTimer) clearTimeout(c.joinTimer);
       conns.delete(c);
       if (c.room && c.clientId) {
-        c.room.leave(c.clientId);
+        c.room.leave(c.clientId, clock());
         broadcastState(c.room);
       }
     });
@@ -365,13 +601,20 @@ export function createApp(opts: AppOptions = {}) {
     }
   }, 30_000);
 
-  const sweeper = setInterval(() => {
-    const now = Date.now();
+  /** Prunes offline seats, retires idle rooms to tombstones, and forgets old tombstones. */
+  function sweep(now = clock()) {
     for (const [id, room] of rooms) {
       if (room.prune(now, graceMs)) broadcastState(room);
       if (room.isExpired(now, roomTtlMs)) {
         rooms.delete(id);
-        dirty = true;
+        retire(room);
+        markDirty();
+      }
+    }
+    for (const [id, t] of tombstones) {
+      if (tombstoneExpired(t, now)) {
+        tombstones.delete(id);
+        markDirty();
       }
     }
     for (const [ip, times] of createdByIp) {
@@ -379,15 +622,12 @@ export function createApp(opts: AppOptions = {}) {
       if (keep.length) createdByIp.set(ip, keep);
       else createdByIp.delete(ip);
     }
-  }, Math.min(15_000, Math.max(250, graceMs / 2)));
+  }
 
-  const saver = setInterval(() => {
-    try {
-      save();
-    } catch (err) {
-      log(`save failed: ${(err as Error).message}`);
-    }
-  }, 15_000);
+  const sweeper = setInterval(() => sweep(), Math.min(15_000, Math.max(250, graceMs / 2)));
+
+  // Safety net: the debounced save normally fires within seconds of a change.
+  const saver = setInterval(saveQuietly, 15_000);
 
   heartbeat.unref();
   sweeper.unref();
@@ -397,12 +637,19 @@ export function createApp(opts: AppOptions = {}) {
     clearInterval(heartbeat);
     clearInterval(sweeper);
     clearInterval(saver);
+    if (saveTimer) clearTimeout(saveTimer);
     for (const c of conns) c.ws.close(1012, 'Server restarting');
     wss.close();
     await new Promise<void>((ok) => server.close(() => ok()));
     dirty = true;
-    save();
+    try {
+      const n = save();
+      if (n !== null) log(`saved ${n} room(s)`);
+    } catch (err) {
+      log(`ERROR: final save failed, rooms may be lost: ${(err as Error).message}`);
+      throw err;
+    }
   }
 
-  return { server, rooms, close, save };
+  return { server, rooms, tombstones, close, save, sweep };
 }

@@ -31,10 +31,14 @@ for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     if (closing) return;
     closing = true;
     console.log(`[poker] ${sig} received, saving rooms and shutting down`);
+    let code = 0;
     try {
       await app.close();
-    } finally {
-      process.exit(0);
+    } catch (err) {
+      // close() already logged why; exit non-zero so the failed save is visible to Docker and the deploy.
+      console.error('[poker] shutdown failed:', err);
+      code = 1;
     }
+    process.exit(code);
   });
 }
