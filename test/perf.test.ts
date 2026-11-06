@@ -3,11 +3,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFile
 import { createServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import WebSocket from 'ws';
 import { createApp } from '../server/app.ts';
 import { sanitizeBeacon } from '../server/vitals.ts';
 import { percentile, uaFamily } from '../shared/vitals.ts';
+import { captureInjectedLookup, takeInjectedLookup } from '../client/src/lib/injected.ts';
 
 type App = ReturnType<typeof createApp>;
 const apps: App[] = [];
@@ -149,6 +150,16 @@ describe('POST /api/vitals', () => {
     for (const line of all.trim().split('\n')) expect(JSON.parse(line)).toMatchObject({ kind: 'home' });
   });
 
+  it('never creates a missing data directory (a bad volume must stay visible to the room save)', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'poker-vitals-')), 'missing');
+    const logs: string[] = [];
+    const { base } = await start({ dataFile: join(dir, 'rooms.json'), feedbackMail: null, log: (m) => logs.push(m) });
+    expect((await post(base, beacon())).status).toBe(204);
+    expect((await post(base, beacon())).status).toBe(204);
+    expect(existsSync(dir)).toBe(false);
+    expect(logs.filter((l) => l.startsWith('vitals: write failed'))).toHaveLength(1);
+  });
+
   it('keeps only a memory ring buffer without a data file', async () => {
     const { app, base } = await start();
     await post(base, beacon());
@@ -236,7 +247,7 @@ describe('room lookup inlined in invite HTML', () => {
     expect(html).not.toContain('"13"');
   });
 
-  it('is not inlined for unknown or malformed ids, the home page, HEAD requests or POST', async () => {
+  it('is not inlined for unknown or malformed ids or other paths', async () => {
     const { base } = await start({ staticDir: staticSite() });
     const id = await newRoom(base);
     for (const path of ['/r/abcdefghij', '/r/short', '/r/abcdefghij/extra', '/', '/index.html', `/x/${id}`]) {
@@ -244,9 +255,15 @@ describe('room lookup inlined in invite HTML', () => {
       expect(res.status).toBe(200);
       expect(await res.text()).not.toContain('room-lookup');
     }
-    expect((await fetch(`${base}/r/${id}`, { method: 'HEAD' })).headers.get('content-length')).not.toBeNull();
-    const plain = await (await fetch(`${base}/r/${id}`, { method: 'HEAD' })).text();
-    expect(plain).toBe('');
+  });
+
+  it('a HEAD request neither injects nor spends lookup budget', async () => {
+    const { base } = await start({ staticDir: staticSite(), lookupsPerIpPerMinute: 1 });
+    const id = await newRoom(base);
+    const head = await fetch(`${base}/r/${id}`, { method: 'HEAD' });
+    expect(head.headers.get('cache-control')).toBe('no-cache');
+    expect(head.headers.get('etag')).toBeTruthy();
+    expect((await fetch(`${base}/api/rooms/${id}`)).status).toBe(200);
   });
 
   it('inlines a revivable (expired) room too', async () => {
@@ -358,5 +375,45 @@ describe('/healthz version', () => {
     } finally {
       child.kill('SIGKILL');
     }
+  });
+});
+
+describe('client use of the inlined lookup', () => {
+  const ID = 'abcdefghij';
+  function page(json: string, path = `/r/${ID}`) {
+    const el = { textContent: json, remove: vi.fn() };
+    vi.stubGlobal('document', { getElementById: (id: string) => (id === 'room-lookup' ? el : null) });
+    vi.stubGlobal('location', { pathname: path });
+    return el;
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('hands out a valid lookup only for the room in the URL, and removes the element', () => {
+    const el = page('{"status":"live","story":"S","players":2,"deckLabel":"Fibonacci"}');
+    captureInjectedLookup();
+    expect(el.remove).toHaveBeenCalled();
+    expect(takeInjectedLookup(ID)).toEqual({ status: 'live', story: 'S', players: 2, deckLabel: 'Fibonacci' });
+    expect(takeInjectedLookup('zzzzzzzzzz')).toBeNull();
+  });
+
+  it('ignores malformed or wrongly shaped JSON and non-room paths', () => {
+    page('{not json');
+    captureInjectedLookup();
+    expect(takeInjectedLookup(ID)).toBeNull();
+    page('{"status":"live","story":5,"players":"x","deckLabel":"F"}');
+    captureInjectedLookup();
+    expect(takeInjectedLookup(ID)).toBeNull();
+    page('{"status":"revivable","deckLabel":"Fibonacci"}', '/');
+    captureInjectedLookup();
+    expect(takeInjectedLookup(ID)).toBeNull();
+  });
+
+  it('expires after a minute, because the head-count goes stale', () => {
+    page('{"status":"revivable","deckLabel":"Fibonacci"}');
+    captureInjectedLookup();
+    vi.stubGlobal('performance', { now: () => 61_000 });
+    expect(takeInjectedLookup(ID)).toBeNull();
+    vi.stubGlobal('performance', { now: () => 5_000 });
+    expect(takeInjectedLookup(ID)).toEqual({ status: 'revivable', deckLabel: 'Fibonacci' });
   });
 });

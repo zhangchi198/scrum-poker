@@ -19,6 +19,7 @@ function valid(v: unknown): v is RoomLookup {
 
 /** Reads (and removes) the inlined lookup. Call once, before rendering. */
 export function captureInjectedLookup() {
+  captured = null;
   const el = document.getElementById('room-lookup');
   if (!el) return;
   try {

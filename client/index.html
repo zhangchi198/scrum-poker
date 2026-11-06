@@ -8,11 +8,11 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Scrum Poker</title>
     <!-- App shell: painted from this inline CSS before any script or stylesheet arrives (CSP allows inline styles, not
-         inline scripts). It mirrors the home page layout; React replaces #root's contents on mount. -->
+         inline scripts). It mirrors the home page layout; Preact replaces #root's contents on mount. -->
     <style>
-      :root { --sh-bg: #f5f6fb; --sh-surface: #fff; --sh-border: #dde1ec; --sh-text: #161a2e; --sh-bar: #e6e9f4; --sh-accent: #4f46e5; }
+      :root { --sh-bg: #f5f6fb; --sh-surface: #fff; --sh-border: #dde1ec; --sh-text: #161a2e; --sh-bar: #e6e9f4; --sh-accent: #4f46e5; --sh-muted: #5b6180; }
       @media (prefers-color-scheme: dark) {
-        :root { --sh-bg: #0d0f1c; --sh-surface: #161a2d; --sh-border: #2b3152; --sh-text: #eceefb; --sh-bar: #232845; --sh-accent: #8b84ff; }
+        :root { --sh-bg: #0d0f1c; --sh-surface: #161a2d; --sh-border: #2b3152; --sh-text: #eceefb; --sh-bar: #232845; --sh-accent: #8b84ff; --sh-muted: #9ba1c4; }
       }
       html, body { margin: 0; background: var(--sh-bg); color: var(--sh-text); }
       #root { min-height: 100dvh; }
@@ -23,7 +23,8 @@
       .sh-card:nth-child(1) { transform: translateX(-38px) rotate(-12deg); }
       .sh-card:nth-child(2) { transform: translateX(38px) rotate(12deg); }
       .sh-card:nth-child(3) { background: var(--sh-accent); z-index: 1; }
-      .sh-brand { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 2.6rem); font-weight: 800; letter-spacing: -0.02em; line-height: 1.2; }
+      .sh-brand { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 2.6rem); font-weight: 800; letter-spacing: -0.02em; line-height: 1.45; }
+      .sh-lede { color: var(--sh-muted); margin: 0 auto; max-width: 42ch; line-height: 1.45; }
       .sh-bar { height: 14px; border-radius: 7px; background: var(--sh-bar); margin: 0 auto; }
       .sh-panel { background: var(--sh-surface); border: 1px solid var(--sh-border); border-radius: 14px; padding: 22px; display: grid; gap: 14px; box-shadow: 0 1px 2px rgb(22 26 46 / 6%), 0 4px 14px rgb(22 26 46 / 6%); }
       .sh-panel .sh-bar { margin: 0; }
@@ -41,8 +42,7 @@
         <div class="sh-hero">
           <div class="sh-cards" aria-hidden="true"><span class="sh-card"></span><span class="sh-card"></span><span class="sh-card"></span></div>
           <p class="sh-brand">Scrum Poker</p>
-          <div class="sh-bar" style="width: min(42ch, 90%)"></div>
-          <div class="sh-bar" style="width: min(30ch, 70%); margin-top: 8px"></div>
+          <p class="sh-lede">Estimate stories together in real time. Votes stay hidden until everyone reveals, so nobody anchors.</p>
         </div>
         <div class="sh-panel" aria-hidden="true">
           <div class="sh-bar" style="width: 40%"></div>
