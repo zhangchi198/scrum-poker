@@ -546,8 +546,13 @@ select:focus {
   width: calc(100px * var(--s));
   transition: opacity 0.2s;
 }
-.seat.offline {
+/* Only the card dims: dimming the text too would drop it below readable contrast. */
+.seat.offline .seat-btn {
   opacity: 0.4;
+}
+.seat.offline .seat-name,
+.seat-away {
+  color: var(--muted);
 }
 .seat-btn {
   appearance: none;

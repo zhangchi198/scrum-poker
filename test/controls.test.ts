@@ -68,7 +68,7 @@ describe('undo', () => {
     r.reset(10, B);
     const u = r.view(A, 11).undo;
     expect(u).toEqual({ kind: 'reset', until: 10 + UNDO_WINDOW_MS, byId: r.participants.get(B)!.publicId, byName: 'Bob' });
-    expect(JSON.stringify(r.view(A, 11).undo)).not.toContain('5');
+    expect(Object.keys(r.view(A, 11).undo!).sort()).toEqual(['byId', 'byName', 'kind', 'until']); // names and times only, no votes
   });
 
   it('is only available inside the window', () => {
