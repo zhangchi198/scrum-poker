@@ -1156,3 +1156,10 @@ select:focus {
   font-weight: 600;
   overflow-wrap: anywhere;
 }
+a.btn {
+  display: inline-block;
+  text-decoration: none;
+}
+.panel.join .join-context {
+  margin-bottom: 6px;
+}
