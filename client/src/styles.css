@@ -115,8 +115,12 @@ h2 {
 .btn:active:not(:disabled) {
   transform: translateY(1px);
 }
-.btn:disabled {
-  opacity: 0.5;
+.btn:disabled,
+.btn.primary:disabled {
+  /* A flat, clearly "off" look that still reads: text keeps at least 3:1 against its own background. */
+  background: var(--surface-2);
+  border-color: var(--border);
+  color: var(--muted);
   cursor: not-allowed;
 }
 .btn.primary {
@@ -1145,4 +1149,10 @@ select:focus {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+.join-context {
+  margin: 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }

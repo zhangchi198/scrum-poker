@@ -1,10 +1,27 @@
 import { useState, type FormEvent } from 'react';
-import { LIMITS } from '../../../shared/protocol.ts';
+import { LIMITS, type RoomLookup } from '../../../shared/protocol.ts';
 import { loadIdentity } from '../lib/identity.ts';
 
-export function JoinDialog({ onJoin, onCancel }: { onJoin: (name: string, spectator: boolean) => void; onCancel: () => void }) {
+function context(info: RoomLookup | null): string | null {
+  if (!info) return null;
+  if (info.status === 'revivable') return 'Joining: a planning poker room · nobody here yet';
+  const what = info.story || 'a planning poker room';
+  const who = info.players === 0 ? 'nobody here yet' : info.players === 1 ? '1 person here' : `${info.players} people here`;
+  return `Joining: ${what} · ${who}`;
+}
+
+export function JoinDialog({
+  info,
+  onJoin,
+  onCancel,
+}: {
+  info: RoomLookup | null;
+  onJoin: (name: string, spectator: boolean) => void;
+  onCancel: () => void;
+}) {
   const [name, setName] = useState(() => loadIdentity().name);
-  const [spectator, setSpectator] = useState(() => loadIdentity().spectator);
+  const [spectator, setSpectator] = useState(false);
+  const joining = context(info);
 
   function submit(e: FormEvent) {
     e.preventDefault();
@@ -15,6 +32,12 @@ export function JoinDialog({ onJoin, onCancel }: { onJoin: (name: string, specta
     <div className="center-page">
       <form className="panel join" onSubmit={submit}>
         <h2>Join the room</h2>
+        {joining && (
+          <p className="join-context">
+            {joining}
+            {info && <span className="muted small"> · {info.deckLabel}</span>}
+          </p>
+        )}
         <label className="field">
           <span>Your name</span>
           <input autoFocus value={name} maxLength={LIMITS.nameLength} placeholder="e.g. Alex" onChange={(e) => setName(e.target.value)} />
