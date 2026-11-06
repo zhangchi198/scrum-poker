@@ -69,6 +69,7 @@ To redeploy without a code change, use **Actions → CI/CD → Run workflow** on
 - Each WebSocket connection is rate-limited to 10 messages per second, with bursts up to 30, and messages are capped at 4 KB. Binary frames cost a token too, and a socket that is rejected 50 times within 10 seconds is closed (1008).
 - At most 5 sockets per client id in a room (the 6th is told `rate_limited` and closed) and 200 sockets per IP, which is generous because whole offices share one public IP (further upgrades get HTTP 429). A socket that has not joined a room within 10 seconds is closed (4000).
 - `POST /api/rooms` bodies over 2 KB get HTTP 413.
+- `GET /api/rooms/:id` (used by the room page to check a room exists before asking for a name) returns only the story, the number of connected voters and the deck name, never a vote. It is limited to 60 requests per minute per IP.
 - A WebSocket upgrade is only accepted from the same origin. The server sends a strict CSP, `Referrer-Policy: no-referrer`, `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, because other subdomains of the domain are not ours), `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Resource-Policy: same-origin`, so room links don't leak.
 - **`CF-Connecting-IP` is trusted verbatim** for the per-IP limits. That is safe only because port 3000 is bound to loopback and reachable solely through cloudflared, which sets the header. Never expose the port directly, or anyone could pick their own "IP".
 
