@@ -29,11 +29,11 @@ export function JoinDialog({
   }
 
   return (
-    <div className="center-page">
+    <main className="center-page">
       <form className="panel join" onSubmit={submit}>
-        <h2>Join the room</h2>
+        <h1 className="page-title">Join the room</h1>
         {joining && (
-          <p className="join-context">
+          <p className="join-context" dir="auto">
             {joining}
             {info && <span className="muted small"> · {info.deckLabel}</span>}
           </p>
@@ -55,6 +55,6 @@ export function JoinDialog({
           </button>
         </div>
       </form>
-    </div>
+    </main>
   );
 }

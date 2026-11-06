@@ -1,5 +1,8 @@
 import { randomBytes } from 'node:crypto';
 import { DECKS, LIMITS, type DeckId, type RoomView, type TimerView } from '../shared/protocol.ts';
+import { cleanText } from '../shared/text.ts';
+
+export { cleanText };
 
 export interface Participant {
   /** Public id shown to other players. The clientId (the "secret") is never sent to anyone else. */
@@ -28,16 +31,6 @@ export function randomId(length: number): string {
     if (b < 58 * 4) out += B58[b % 58]; // rejection sampling keeps the distribution uniform
   }
   return out.length === length ? out : randomId(length);
-}
-
-export function cleanText(input: unknown, max: number): string {
-  if (typeof input !== 'string') return '';
-  // Strip control, zero-width and bidi-override characters (invisible names, spoofed text); collapse whitespace.
-  return input
-    .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, max);
 }
 
 export function parseCustomDeck(input: unknown): string[] | null {

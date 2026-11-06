@@ -5,6 +5,7 @@ import { parseInvite } from '../lib/invite.ts';
 import { markJoined } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
 import { parseCustomInput } from './deck.ts';
+import { DeckPreview } from './DeckPreview.tsx';
 import { FeedbackDialog } from './FeedbackDialog.tsx';
 
 const DECK_CHOICES: { id: DeckId; label: string; preview: string }[] = [
@@ -57,7 +58,7 @@ export function Home() {
   }
 
   return (
-    <div className="home">
+    <main className="home">
       <div className="home-hero">
         <div className="hero-cards" aria-hidden>
           <span className="mini-card c1">2</span>
@@ -89,10 +90,13 @@ export function Home() {
         </fieldset>
 
         {deckId === 'custom' && (
-          <label className="field">
-            <span>Cards (comma separated, up to {LIMITS.customCards})</span>
-            <input value={custom} onChange={(e) => setCustom(e.target.value)} />
-          </label>
+          <div className="field">
+            <label htmlFor="home-custom">
+              <span>Cards (comma separated, up to {LIMITS.customCards}, {LIMITS.customCardLength} characters each)</span>
+            </label>
+            <input id="home-custom" value={custom} aria-describedby="home-custom-preview" onChange={(e) => setCustom(e.target.value)} />
+            <DeckPreview id="home-custom-preview" input={custom} />
+          </div>
         )}
 
         {error && <p className="form-error" role="alert">{error}</p>}
@@ -116,6 +120,6 @@ export function Home() {
         </button>
       </p>
       {feedbackOpen && <FeedbackDialog page="home" onClose={() => setFeedbackOpen(false)} />}
-    </div>
+    </main>
   );
 }

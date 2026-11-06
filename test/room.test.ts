@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Room, RoomError, isTombstone, randomId } from '../server/room.ts';
+import { Room, RoomError, cleanText, isTombstone, randomId } from '../server/room.ts';
 
 const A = 'client-a-000000000000';
 const B = 'client-b-000000000000';
@@ -238,5 +238,28 @@ describe('Room: spectator switch, leave', () => {
     expect(r.participants.has(A)).toBe(false);
     expect(r.remove(A, 2)).toBe(false);
     expect(r.view(B).participants.map((p) => p.name)).toEqual(['Bob', 'Cara']);
+  });
+});
+
+describe('grapheme-aware limits (F-9)', () => {
+  const FAMILY = '👨‍👩‍👧';
+
+  it('cleanText counts a joined emoji as one character and never cuts it in half', () => {
+    expect(cleanText(FAMILY.repeat(3), 2)).toBe(FAMILY.repeat(2));
+    expect(cleanText('e\u0301e\u0301e\u0301', 2)).toBe('e\u0301e\u0301');
+    expect(cleanText('abcdef', 4)).toBe('abcd');
+  });
+
+  it('still strips invisible and bidi-override characters, and a ZWJ that joins nothing', () => {
+    expect(cleanText('a\u200bb\u202ec\u2066d', 10)).toBe('abcd');
+    expect(cleanText('\u200d\u200d', 10)).toBe('');
+    expect(cleanText('a\u200db', 10)).toBe('ab');
+  });
+
+  it('keeps four-grapheme custom cards whole, emoji included', () => {
+    const r = new Room('Room123456', 0);
+    r.join(A, 'Alice', false, 0);
+    r.setDeck('custom', [FAMILY.repeat(5), 'XXL?'], 0);
+    expect(r.view(A).cards).toEqual([FAMILY.repeat(4), 'XXL?']);
   });
 });

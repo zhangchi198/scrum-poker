@@ -23,6 +23,7 @@ export function StoryInput({ value, onCommit }: { value: string; onCommit: (v: s
   return (
     <input
       className="story-input"
+      dir="auto"
       value={draft}
       maxLength={LIMITS.storyLength}
       placeholder="What are we estimating?"

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { DECK_IDS, DECKS, LIMITS, type DeckId, type ParticipantView, type RoomView } from '../../../shared/protocol.ts';
 import { validateCustomInput } from './deck.ts';
+import { DeckPreview } from './DeckPreview.tsx';
 import { FeedbackDialog } from './FeedbackDialog.tsx';
 
 const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
@@ -29,6 +30,7 @@ export function SettingsDialog({
   const customRef = useRef<HTMLInputElement>(null);
   const downOnBackdrop = useRef(false);
   const errorId = useId();
+  const previewId = useId();
   const [name, setName] = useState(me.name);
   const [spectator, setSpectator] = useState(me.spectator);
   const [deckId, setDeckId] = useState<DeckId>(room.deckId);
@@ -107,8 +109,9 @@ export function SettingsDialog({
               value={custom}
               onChange={(e) => setCustom(e.target.value)}
               aria-invalid={deckError ? true : undefined}
-              aria-describedby={deckError ? errorId : undefined}
+              aria-describedby={deckError ? `${errorId} ${previewId}` : previewId}
             />
+            <DeckPreview id={previewId} input={custom} />
             {deckError && (
               <p id={errorId} className="form-error" role="alert">
                 {deckError}

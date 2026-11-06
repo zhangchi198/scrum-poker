@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { cardLen } from '../lib/format.ts';
 
 /** The row of cards. Scrolls sideways when it overflows, with an edge fade as the scroll hint. */
 export function Hand({
@@ -42,11 +43,12 @@ export function Hand({
           <button
             key={card}
             className={`card-btn ${selected ? 'selected' : ''}`}
+            data-len={cardLen(card)}
             disabled={!canVote}
             aria-pressed={selected}
             onClick={() => onVote(selected ? null : card)}
           >
-            {card}
+            <bdi>{card}</bdi>
           </button>
         );
       })}
