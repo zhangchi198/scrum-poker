@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { TIMER_PRESETS, type TimerView } from '../../../shared/protocol.ts';
 
 function fmt(totalSeconds: number) {
@@ -6,6 +6,10 @@ function fmt(totalSeconds: number) {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+/**
+ * Timer picker as a disclosure: a button that reveals ordinary buttons. Tab walks them, Esc closes and returns
+ * focus to the toggle, and so do a click elsewhere and tabbing out.
+ */
 export function TimerControl({
   timer,
   clockOffset,
@@ -18,6 +22,8 @@ export function TimerControl({
   const [open, setOpen] = useState(false);
   const [, tick] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const panelId = useId();
 
   useEffect(() => {
     if (!timer) return;
@@ -27,9 +33,9 @@ export function TimerControl({
 
   useEffect(() => {
     if (!open) return;
-    const onDown = (e: MouseEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
+    const onDown = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && setOpen(false);
+    document.addEventListener('pointerdown', onDown);
+    return () => document.removeEventListener('pointerdown', onDown);
   }, [open]);
 
   if (timer) {
@@ -46,16 +52,28 @@ export function TimerControl({
   }
 
   return (
-    <div className="timer-menu" ref={ref}>
-      <button className="btn" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
+    <div
+      className="timer-menu"
+      ref={ref}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape' && open) {
+          e.stopPropagation();
+          setOpen(false);
+          toggleRef.current?.focus();
+        }
+      }}
+      onBlur={(e) => {
+        if (open && !e.currentTarget.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
+    >
+      <button ref={toggleRef} className="btn" onClick={() => setOpen((o) => !o)} aria-expanded={open} aria-controls={open ? panelId : undefined}>
         ⏱ Timer
       </button>
       {open && (
-        <div className="menu" role="menu">
+        <div className="menu" id={panelId} role="group" aria-label="Timer length">
           {TIMER_PRESETS.map((s) => (
             <button
               key={s}
-              role="menuitem"
               onClick={() => {
                 onSet(s);
                 setOpen(false);

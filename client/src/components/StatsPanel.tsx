@@ -1,8 +1,5 @@
 import type { RoundStats } from '../../../shared/protocol.ts';
-
-export function formatNumber(n: number): string {
-  return Number.isInteger(n) ? String(n) : n.toFixed(1);
-}
+import { cardLen, formatNumber } from '../lib/format.ts';
 
 export function StatsPanel({ stats }: { stats: RoundStats }) {
   const max = Math.max(...stats.distribution.map((d) => d.count));
@@ -35,7 +32,9 @@ export function StatsPanel({ stats }: { stats: RoundStats }) {
       <ul className="distribution">
         {stats.distribution.map((d) => (
           <li key={d.card}>
-            <span className="dist-card">{d.card}</span>
+            <span className="dist-card" data-len={cardLen(d.card)}>
+              {d.card}
+            </span>
             <span className="dist-bar">
               <span style={{ width: `${(d.count / max) * 100}%` }} />
             </span>

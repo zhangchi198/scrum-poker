@@ -3,7 +3,11 @@ import { computeStats, type RoomLookup } from '../../../shared/protocol.ts';
 import { IDENTITY_KEY, loadIdentity, saveIdentity } from '../lib/identity.ts';
 import { forgetJoined, hasJoined, markJoined, readSpectator, writeSpectator } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
+import { NEW_ROUND_MESSAGE, progressDelay, revealMessage } from '../lib/announce.ts';
+import { cardLen, formatNumber } from '../lib/format.ts';
+import { displayNames } from '../lib/names.ts';
 import { nudgeTargets, tallyVotes, voteStatus } from '../lib/tally.ts';
+import { createTitleFlasher } from '../lib/title.ts';
 import { useRoom } from '../lib/useRoom.ts';
 import { Hand } from './Hand.tsx';
 import { JoinDialog } from './JoinDialog.tsx';
@@ -11,7 +15,8 @@ import { NotFound } from './NotFound.tsx';
 import { Reactions } from './Reactions.tsx';
 import { Seat } from './Seat.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
-import { StatsPanel, formatNumber } from './StatsPanel.tsx';
+import { StatsPanel } from './StatsPanel.tsx';
+import { StoryLine } from './StoryLine.tsx';
 import { StoryInput } from './StoryInput.tsx';
 import { TimerControl } from './TimerControl.tsx';
 
@@ -27,6 +32,9 @@ interface Toast {
 }
 
 let seq = 0;
+const titles = createTitleFlasher(document);
+/** Voting progress is announced at most this often (ms), so a burst of votes is one announcement. */
+const PROGRESS_GAP = 4000;
 
 export function RoomPage({ roomId }: { roomId: string }) {
   // The join dialog shows on the first visit to a room in this browser (the creator, who typed a name on Home, skips it).
@@ -45,6 +53,10 @@ export function RoomPage({ roomId }: { roomId: string }) {
   const [actionEl, setActionEl] = useState<HTMLElement | null>(null);
   const [bars, setBars] = useState({ top: 0, dock: 0 });
   const [pinned, setPinned] = useState(false);
+  const [announcement, setAnnouncement] = useState('');
+  const resultRef = useRef<HTMLHeadingElement>(null);
+  // Set when this user pressed Reveal / Start new round, so focus follows the change they caused.
+  const focusAfterChange = useRef(false);
 
   const toast = useCallback((text: string) => {
     const key = ++seq;
@@ -65,7 +77,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
       toast(`👋 ${fromName} is waiting on your vote`);
       setShakeKey((k) => k + 1);
       navigator.vibrate?.(200);
-      flashTitle('👋 Your vote!');
+      titles.flash('👋 Your vote!');
     },
     onError: (_code, message) => toast(message),
   });
@@ -73,6 +85,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
   const me = room?.participants.find((p) => p.id === you) ?? null;
   const players = useMemo(() => room?.participants.filter((p) => !p.spectator) ?? [], [room]);
   const spectators = room?.participants.filter((p) => p.spectator) ?? [];
+  const labels = useMemo(() => displayNames(room?.participants ?? []), [room?.participants]);
   const tally = tallyVotes(players);
   const votedCount = tally.voted;
   const pending = nudgeTargets(room?.participants ?? [], you);
@@ -94,6 +107,45 @@ export function RoomPage({ roomId }: { roomId: string }) {
       for (let i = 0; i < 10; i++) setTimeout(() => float('🎉', ''), i * 90);
     }
   }, [room, stats, float]);
+
+  // Focus: after a reveal or a new round the button that was pressed is gone, so move focus somewhere useful
+  // instead of letting it fall to <body>. Changes made by someone else only move focus if it was lost.
+  const statsRef = useRef(stats);
+  statsRef.current = stats;
+  const prevRevealed = useRef<boolean | null>(null);
+  const lastAnnounced = useRef(0);
+  const revealed = room?.revealed ?? null;
+  useEffect(() => {
+    if (revealed === null) return;
+    const was = prevRevealed.current;
+    prevRevealed.current = revealed;
+    if (was === null || was === revealed) return;
+    // Spoken first, and it holds back the progress announcements for a moment.
+    lastAnnounced.current = Date.now();
+    setAnnouncement(revealed ? revealMessage(statsRef.current) : NEW_ROUND_MESSAGE);
+    const active = document.activeElement;
+    const lost = !active || active === document.body || !document.body.contains(active);
+    const mine = focusAfterChange.current;
+    focusAfterChange.current = false;
+    if (!mine && !lost) return;
+    if (revealed) resultRef.current?.focus();
+    else (dockEl?.querySelector<HTMLElement>('.card-btn.selected:not(:disabled), .card-btn:not(:disabled)') ?? actionEl)?.focus();
+  }, [revealed, dockEl, actionEl]);
+
+  // Voting progress for screen readers: the latest status, at most once per PROGRESS_GAP.
+  const progress = voteStatus(tally);
+  const progressSeen = useRef<string | null>(null);
+  useEffect(() => {
+    if (revealed !== false) return;
+    const first = progressSeen.current === null;
+    progressSeen.current = progress;
+    if (first || tally.votedOnline === 0) return;
+    const id = setTimeout(() => {
+      lastAnnounced.current = Date.now();
+      setAnnouncement(progress);
+    }, progressDelay(lastAnnounced.current, Date.now(), PROGRESS_GAP));
+    return () => clearTimeout(id);
+  }, [progress, revealed, tally.votedOnline]);
 
   // Publish the sticky bars' heights (CSS uses them for scroll padding and toast position).
   useEffect(() => {
@@ -129,7 +181,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
   }, [actionEl, bars]);
 
   useEffect(() => {
-    document.title = room?.story ? `${room.story} · Scrum Poker` : 'Scrum Poker';
+    titles.setBase(room?.story ? `${room.story} · Scrum Poker` : 'Scrum Poker');
   }, [room?.story]);
 
   // Before asking for a name, check the room exists (and get context for the dialog).
@@ -162,9 +214,10 @@ export function RoomPage({ roomId }: { roomId: string }) {
   if (!joined) {
     if (lookup === undefined) {
       return (
-        <div className="center-page">
+        <main className="center-page">
+          <h1 className="sr-only">Scrum Poker</h1>
           <p className="muted">Looking for the room…</p>
-        </div>
+        </main>
       );
     }
     if (lookup === 'missing') {
@@ -191,9 +244,9 @@ export function RoomPage({ roomId }: { roomId: string }) {
 
   if (joinError) {
     return (
-      <div className="center-page">
+      <main className="center-page">
         <div className="panel">
-          <h2>Couldn’t join the room</h2>
+          <h1 className="page-title">Couldn’t join the room</h1>
           <p className="muted" role="alert">
             {joinError}
           </p>
@@ -206,15 +259,16 @@ export function RoomPage({ roomId }: { roomId: string }) {
             </button>
           </div>
         </div>
-      </div>
+      </main>
     );
   }
 
   if (!room) {
     return (
-      <div className="center-page">
+      <main className="center-page">
+        <h1 className="sr-only">Scrum Poker</h1>
         <p className="muted">Connecting…</p>
-      </div>
+      </main>
     );
   }
 
@@ -247,11 +301,16 @@ export function RoomPage({ roomId }: { roomId: string }) {
     navigate('/');
   }
 
-  const canVote = me && !me.spectator && !room.revealed;
+  const canVote = me && !me.spectator && !room.revealed && status === 'open';
+  const revealOrReset = (t: 'reveal' | 'reset') => {
+    focusAfterChange.current = true;
+    send({ t });
+  };
 
   return (
     <div className="room">
       <header className="topbar" ref={setTopEl}>
+        <h1 className="sr-only">Scrum Poker room{room.story ? `: ${room.story}` : ''}</h1>
         <a
           className="brand"
           href="/"
@@ -270,7 +329,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
             <button
               className="btn primary pinned-action"
               disabled={!room.revealed && votedCount === 0}
-              onClick={() => send({ t: room.revealed ? 'reset' : 'reveal' })}
+              onClick={() => revealOrReset(room.revealed ? 'reset' : 'reveal')}
               title={room.revealed ? 'Start new round' : 'Reveal cards'}
             >
               {room.revealed ? 'New round' : 'Reveal'}
@@ -283,19 +342,23 @@ export function RoomPage({ roomId }: { roomId: string }) {
             Invite
           </button>
           <button ref={settingsBtn} className="btn icon" onClick={() => setSettingsOpen(true)} aria-label="Room settings" title="Settings">
-            ⚙︎
+            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
           </button>
         </div>
       </header>
 
-      {status !== 'open' && <div className="banner">Reconnecting…</div>}
+      <div role="status">{status !== 'open' && <div className="banner">Reconnecting…</div>}</div>
 
       <main className="table-area">
-        <div className="seats">
+        <StoryLine story={room.story} />
+        <ul className="seats" role="list" aria-label="Players">
           {top.map((p) => (
-            <Seat key={p.id} p={p} isMe={p.id === you} revealed={room.revealed} />
+            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} />
           ))}
-        </div>
+        </ul>
 
         <div className={`table ${room.revealed ? 'is-revealed' : ''}`}>
           {!room.revealed ? (
@@ -307,7 +370,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
                 ref={setActionEl}
                 className={`btn primary big ${votedCount > 0 && tally.votedOnline === tally.online ? 'pulse' : ''}`}
                 disabled={votedCount === 0}
-                onClick={() => send({ t: 'reveal' })}
+                onClick={() => revealOrReset('reveal')}
               >
                 Reveal cards
               </button>
@@ -319,30 +382,39 @@ export function RoomPage({ roomId }: { roomId: string }) {
             </>
           ) : (
             <>
-              <p className="table-status">
-                {stats?.consensus ? 'Consensus!' : stats?.average !== null && stats?.average !== undefined ? 'Average' : 'Most common'}
-              </p>
-              <p className="table-result">
-                {stats?.average !== null && stats?.average !== undefined
-                  ? formatNumber(stats.average)
-                  : stats?.mostCommon.join(' / ') || '—'}
-              </p>
-              <button ref={setActionEl} className="btn primary big" onClick={() => send({ t: 'reset' })}>
+              <h2 className="table-heading" ref={resultRef} tabIndex={-1}>
+                <span className="table-status">
+                  {stats?.consensus ? 'Consensus!' : stats?.average !== null && stats?.average !== undefined ? 'Average' : 'Most common'}
+                </span>{' '}
+                <span className="table-result" dir="auto">
+                  {stats?.average !== null && stats?.average !== undefined
+                    ? formatNumber(stats.average)
+                    : stats?.mostCommon.join(' / ') || '—'}
+                </span>
+              </h2>
+              <button ref={setActionEl} className="btn primary big" onClick={() => revealOrReset('reset')}>
                 Start new round
               </button>
             </>
           )}
         </div>
 
-        <div className="seats">
+        <ul className="seats" role="list" aria-label="More players">
           {bottom.map((p) => (
-            <Seat key={p.id} p={p} isMe={p.id === you} revealed={room.revealed} />
+            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} tipAbove />
           ))}
-        </div>
+        </ul>
 
         {spectators.length > 0 && (
           <p className="spectators">
-            👀 Watching: {spectators.map((s) => s.name + (s.id === you ? ' (you)' : '')).join(', ')}
+            👀 Watching:{' '}
+            {spectators.map((s, i) => (
+              <span key={s.id}>
+                {i > 0 && ', '}
+                <bdi>{labels.get(s.id) ?? s.name}</bdi>
+                {s.id === you ? ' (you)' : ''}
+              </span>
+            ))}
           </p>
         )}
 
@@ -362,14 +434,20 @@ export function RoomPage({ roomId }: { roomId: string }) {
             <div className="vote-chip">
               {me?.vote ? (
                 <>
-                  Your vote: <span className="chip-card">{me.vote}</span>
+                  Your vote:{' '}
+                  <span className="chip-card" data-len={cardLen(me.vote)}>
+                    {me.vote}
+                  </span>
                 </>
               ) : (
                 'You didn’t vote'
               )}
             </div>
           ) : (
-            <Hand key={shakeKey} cards={room.cards} vote={me?.vote} canVote={!!canVote} shakeKey={shakeKey} onVote={(value) => send({ t: 'vote', value })} />
+            <>
+              {status !== 'open' && <p className="hand-hint">Reconnecting… cards are paused</p>}
+              <Hand key={shakeKey} cards={room.cards} vote={me?.vote} canVote={!!canVote} shakeKey={shakeKey} onVote={(value) => send({ t: 'vote', value })} />
+            </>
           )}
         </div>
         <Reactions onReact={(emoji) => send({ t: 'react', emoji })} />
@@ -382,6 +460,10 @@ export function RoomPage({ roomId }: { roomId: string }) {
             {f.name && <span className="floater-name">{f.name}</span>}
           </div>
         ))}
+      </div>
+
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        {announcement}
       </div>
 
       <div className="toasts" role="status" aria-live="polite">
@@ -407,12 +489,4 @@ export function RoomPage({ roomId }: { roomId: string }) {
       )}
     </div>
   );
-}
-
-let titleTimer: ReturnType<typeof setTimeout> | undefined;
-function flashTitle(text: string) {
-  const original = document.title.startsWith('👋') ? document.title.split(' — ')[1] ?? 'Scrum Poker' : document.title;
-  document.title = `${text} — ${original}`;
-  clearTimeout(titleTimer);
-  titleTimer = setTimeout(() => (document.title = original), 6000);
 }
