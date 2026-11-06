@@ -1,5 +1,5 @@
 [Unit]
-Description=Deploy scrum-poker main if it moved (pull-based, see /usr/sbin/poker-deploy)
+Description=Deploy scrum-poker prod branch if it moved (pull-based, see /usr/sbin/poker-deploy)
 After=network-online.target docker.service
 Wants=network-online.target
 
