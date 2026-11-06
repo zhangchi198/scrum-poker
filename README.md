@@ -51,8 +51,8 @@ The production notes below describe the author's own deployment. To run your own
 
 - **Host:** an unprivileged Ubuntu 24.04 LXC (`poker`) on a home Proxmox box, with nesting enabled, 2 vCPU, 2 GB RAM and a 16 GB disk. Nothing inbound depends on its IP, because the tunnel connects outbound and the deploy pulls.
 - **Ingress:** Cloudflare Tunnel `scrum-poker`, config at `/etc/cloudflared/config.yml` in the LXC. No router ports are open.
-- **CI:** `.github/workflows/ci.yml` runs typecheck, tests, the client build and a Docker build on GitHub-hosted runners, for pull requests and pushes to `main`. It never deploys.
-- **Deploy (pull-based):** `deploy/poker-deploy.sh`, installed as `/usr/sbin/poker-deploy` with the units in `deploy/systemd/`. `poker-deploy.timer` runs it every 2 minutes. It fetches `main` into `/opt/scrum-poker` and, when `main` moved and the commit's `Typecheck, test, build` check passed, runs `docker compose build --pull`, then `up -d --wait`, then a smoke test (`/healthz` must report the new short SHA). A failed deploy rolls back to the previous commit and that commit is skipped until `main` moves again. So merging to `main` deploys within about 2 minutes of CI going green. There is deliberately no self-hosted GitHub runner: GitHub never executes anything on the box, so pull requests from forks cannot reach it.
+- **CI:** `.github/workflows/ci.yml` runs typecheck, tests, the client build and a Docker build on GitHub-hosted runners, for pull requests and pushes to `main`. When they pass on a push to `main`, its `promote` job fast-forwards the **`prod` branch** to that commit (fast-forward only, so a slower older run can't move prod back). Don't push to `prod` by hand: whatever is on it gets deployed.
+- **Deploy (pull-based):** `deploy/poker-deploy.sh`, installed as `/usr/sbin/poker-deploy` with the units in `deploy/systemd/`. `poker-deploy.timer` runs it every 2 minutes. It fetches `prod` into `/opt/scrum-poker` over SSH with a read-only deploy key (`/root/.ssh/id_ed25519`, titled `poker-lxc-deploy` under the repo's Deploy keys) and, when `prod` moved, runs `docker compose build --pull`, then `up -d --wait`, then a smoke test (`/healthz` must report the new short SHA). A failed deploy rolls back to the previous commit, and that commit is skipped until `prod` moves again. So merging to `main` deploys about 1–3 minutes after CI goes green. There is deliberately no self-hosted GitHub runner: GitHub never executes anything on the box, so pull requests, including ones from forks, cannot reach it.
 - **Weekly rebuild:** `poker-rebuild.timer` (Sunday 08:00 UTC) redeploys the current commit with `build --pull`, so `node:24-alpine` OS and Node patches reach prod even when nothing in the repo changed.
 - **Data:** Docker volume `scrum-poker_poker-data` holds `/data/rooms.json`. Losing it ends every open room and every revivable link (tombstone).
 - **Backups:** the LXC is in a weekly local vzdump job on the Proxmox host, deliberately separate from the hourly backup job of another project on the same box. The app is nearly stateless, so the README is enough to rebuild it.
@@ -69,9 +69,10 @@ systemctl status cloudflared poker-deploy.timer poker-rebuild.timer
 journalctl -u poker-deploy -u poker-rebuild -n 50   # deploy history
 systemctl start poker-rebuild                   # redeploy now without a code change
 cat /var/lib/poker-deploy/{deployed,failed}     # deployed SHA, and a skipped bad SHA if any
+git -C /opt/scrum-poker log -1 --oneline origin/prod   # what prod points at
 ```
 
-Installing or updating the deploy itself (as root in the LXC; needs `git`, `jq`, `curl`, Docker with compose):
+Installing or updating the deploy itself (as root in the LXC; needs `git`, `jq`, `curl`, Docker with compose, and the deploy key above with `github.com` in `/root/.ssh/known_hosts`):
 
 ```sh
 install -m 0755 /opt/scrum-poker/deploy/poker-deploy.sh /usr/sbin/poker-deploy
