@@ -10,6 +10,10 @@ services:
     stop_grace_period: 10s
     ports:
       - "127.0.0.1:3000:3000"
+    # Optional SMTP settings for the feedback digest (see README, "Feedback email"). Written by poker-set-mail.
+    env_file:
+      - path: /etc/scrum-poker/mail.env
+        required: false
     volumes:
       - poker-data:/data
     logging:

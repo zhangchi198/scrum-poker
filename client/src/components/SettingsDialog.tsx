@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { DECK_IDS, DECKS, LIMITS, type DeckId, type ParticipantView, type RoomView } from '../../../shared/protocol.ts';
 import { navigate } from '../lib/router.ts';
 import { validateCustomInput } from './deck.ts';
+import { FeedbackDialog } from './FeedbackDialog.tsx';
 
 const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
 
@@ -32,6 +33,7 @@ export function SettingsDialog({
   const [deckId, setDeckId] = useState<DeckId>(room.deckId);
   const [custom, setCustom] = useState(room.deckId === 'custom' ? room.cards.join(', ') : '1, 2, 3, 5, 8, ?');
   const [submitted, setSubmitted] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   useEffect(() => {
     const d = dialogRef.current;
@@ -128,7 +130,14 @@ export function SettingsDialog({
             </button>
           </div>
         </div>
+        <p className="settings-feedback">
+          <button type="button" className="link-btn" onClick={() => setFeedbackOpen(true)}>
+            Send feedback
+          </button>
+        </p>
       </form>
+      {/* Stacks on top of this dialog in the top layer; closing it returns focus to the button above. */}
+      {feedbackOpen && <FeedbackDialog page="room" onClose={() => setFeedbackOpen(false)} />}
     </dialog>
   );
 }

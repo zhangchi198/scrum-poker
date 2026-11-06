@@ -72,6 +72,24 @@ To redeploy without a code change, use **Actions → CI/CD → Run workflow** on
 - A WebSocket upgrade is only accepted from the same origin. The server sends a strict CSP, `Referrer-Policy: no-referrer`, `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, because other subdomains of the domain are not ours), `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Resource-Policy: same-origin`, so room links don't leak.
 - **`CF-Connecting-IP` is trusted verbatim** for the per-IP limits. That is safe only because port 3000 is bound to loopback and reachable solely through cloudflared, which sets the header. Never expose the port directly, or anyone could pick their own "IP".
 
+### Feedback email
+
+Users can send feedback from the home page footer or from a room's Settings dialog (**Send feedback**). Each message is stored, and the owner gets an email digest.
+
+- **Digest rule:** at most one email per rolling 24 hours. When feedback arrives and no email has gone out in the last 24h (or ever), one email with everything unsent is sent immediately. Anything that arrives later is held and sent together in a single email once 24h have passed since the last one (checked on every submission and every 10 minutes). If SMTP fails, nothing is marked as sent and the next check retries; a failure does not count as the day's email. An email carries at most 100 items, and the rest follow in the next digest.
+- **Storage:** `feedback.jsonl` (one JSON line per message) and `feedback-mail.json` (`lastSentAt` and the ids already emailed) sit next to `DATA_FILE`, in the `/data` volume, so restarts neither resend nor lose track. The IP address is never stored. The only context sent is the page kind (`home` or `room`), viewport size and user agent. A room id or URL is never included.
+- **Limits:** `POST /api/feedback` takes at most 8 KB (413 above), 5 messages per IP per hour and 200 per day overall (429).
+- **Email:** plain text only. Subject `Scrum Poker feedback: N new (B bugs, I ideas, O other)`; times are shown in UTC and America/Toronto; Reply-To is set when the digest has exactly one address-like contact.
+- **Config:** environment variables `SMTP_USER`, `SMTP_PASS`, `FEEDBACK_TO` (all three required), plus optional `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (default `465`, TLS) and `FEEDBACK_FROM` (default `SMTP_USER`). Without the three required ones the app logs `feedback email disabled (no SMTP config)` and only stores feedback. `compose.yaml` reads them from the optional file `/etc/scrum-poker/mail.env`, which is never committed.
+
+One-time setup: create a Gmail app password at https://myaccount.google.com/apppasswords (2-step verification must be on). Install `deploy/poker-set-mail.sh` on the LXC as `/usr/local/sbin/poker-set-mail` (root, mode 0755), then run this in a terminal (**not** through an AI chat, the script asks for the password):
+
+```sh
+ssh -t root@192.168.50.4 "pct exec 102 -- poker-set-mail <your gmail address>"
+```
+
+It writes `/etc/scrum-poker/mail.env` (root:runner, 0640), recreates the app container, sends a test feedback and prints the mail log lines. Re-run it to rotate the password.
+
 ### Persistence
 
 `/data/rooms.json` is `{ "version": 2, "rooms": [...], "tombstones": [...] }`; the legacy plain array of rooms still loads. Rooms are restored one by one, so a single bad entry is skipped (and logged) instead of dropping the rest. If the file cannot be parsed at startup it is renamed to `rooms.json.corrupt-<timestamp>` and the server logs an error and starts empty. Shutdown logs `saved N room(s)`; if that final save fails the process logs the error and exits non-zero.

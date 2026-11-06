@@ -3,6 +3,7 @@ import { DECKS, LIMITS, type DeckId } from '../../../shared/protocol.ts';
 import { loadIdentity, saveIdentity } from '../lib/identity.ts';
 import { navigate } from '../lib/router.ts';
 import { parseCustomInput } from './deck.ts';
+import { FeedbackDialog } from './FeedbackDialog.tsx';
 
 const DECK_CHOICES: { id: DeckId; label: string; preview: string }[] = [
   ...Object.entries(DECKS).map(([id, d]) => ({
@@ -20,6 +21,7 @@ export function Home() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState('');
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
 
   async function create(e: FormEvent) {
     e.preventDefault();
@@ -102,6 +104,12 @@ export function Home() {
       </form>
 
       <p className="footnote">No accounts. Rooms stay around for 30 days of inactivity, so bookmark your room link.</p>
+      <p className="footnote">
+        <button type="button" className="link-btn" onClick={() => setFeedbackOpen(true)}>
+          Send feedback
+        </button>
+      </p>
+      {feedbackOpen && <FeedbackDialog page="home" onClose={() => setFeedbackOpen(false)} />}
     </div>
   );
 }

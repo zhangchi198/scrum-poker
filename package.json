@@ -16,10 +16,12 @@
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
+    "nodemailer": "^10.3.1",
     "ws": "^8.22.1"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@types/ws": "^8.18.2",
