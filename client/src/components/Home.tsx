@@ -101,7 +101,7 @@ export function Home() {
         <button className="btn">Join</button>
       </form>
 
-      <p className="footnote">No accounts. Rooms are deleted after a day of inactivity.</p>
+      <p className="footnote">No accounts. Rooms stay around for 30 days of inactivity, so bookmark your room link.</p>
     </div>
   );
 }
