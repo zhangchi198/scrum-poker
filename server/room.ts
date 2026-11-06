@@ -136,7 +136,8 @@ export class Room {
     } else {
       p.name = name;
       p.spectator = spectator;
-      if (spectator) p.vote = null;
+      // After the reveal the vote is part of the shown results, so it stays; before it, spectators hold no vote.
+      if (spectator && !this.revealed) p.vote = null;
     }
     p.connections++;
     p.disconnectedAt = null;
@@ -150,6 +151,13 @@ export class Room {
     p.connections = Math.max(0, p.connections - 1);
     if (p.connections === 0) p.disconnectedAt = now;
     this.touch(now);
+  }
+
+  /** Removes a participant right away (no grace period), e.g. when they press "Leave room". */
+  remove(clientId: string, now = Date.now()): boolean {
+    if (!this.participants.delete(clientId)) return false;
+    this.touch(now);
+    return true;
   }
 
   /** Drops participants that have been offline longer than the grace period. Returns true if anything changed. */
@@ -235,7 +243,7 @@ export class Room {
     if (name !== undefined) p.name = cleanText(name, LIMITS.nameLength) || p.name;
     if (typeof spectator === 'boolean') {
       p.spectator = spectator;
-      if (spectator) p.vote = null;
+      if (spectator && !this.revealed) p.vote = null; // a revealed vote is part of the results; don't rewrite them
     }
     this.touch(now);
     return true;
