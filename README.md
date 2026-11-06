@@ -97,3 +97,8 @@ It writes `/etc/scrum-poker/mail.env` (root:runner, 0640), recreates the app con
 ### Persistence
 
 `/data/rooms.json` is `{ "version": 2, "rooms": [...], "tombstones": [...] }`; the legacy plain array of rooms still loads. Each room also stores its `facilitator` (the private client id, or `null`); files written before the lock existed have no such field and load as unlocked. The 10-second undo snapshot is memory only and is not saved. Rooms are restored one by one, so a single bad entry is skipped (and logged) instead of dropping the rest. If the file cannot be parsed at startup it is renamed to `rooms.json.corrupt-<timestamp>` and the server logs an error and starts empty. Shutdown logs `saved N room(s)`; if that final save fails the process logs the error and exits non-zero.
+
+## Dependency updates
+
+- **Dependabot** (`.github/dependabot.yml`) opens PRs for npm packages and the Docker base image weekly (Monday 06:00 Toronto, with routine minor and patch bumps grouped into one PR), and for GitHub Actions monthly. GitHub security advisories also trigger immediate security-update PRs. PRs only run the `check` job on GitHub-hosted runners. The self-hosted runner in the LXC only ever deploys `main`, so unmerged dependency code never runs on the box.
+- **Monthly rebuild:** the CI/CD workflow also runs on the 1st of each month (`schedule`), and every deploy runs `docker compose build --pull`. New `node:24-alpine` OS and Node patches therefore reach prod even when nothing in the repo changed.
