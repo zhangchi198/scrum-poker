@@ -1,6 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { DECK_IDS, DECKS, LIMITS, type DeckId, type ParticipantView, type RoomView } from '../../../shared/protocol.ts';
-import { navigate } from '../lib/router.ts';
 import { validateCustomInput } from './deck.ts';
 
 const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
@@ -15,12 +14,14 @@ export function SettingsDialog({
   onClose,
   onProfile,
   onDeck,
+  onLeave,
 }: {
   room: RoomView;
   me: ParticipantView;
   onClose: () => void;
   onProfile: (patch: { name?: string; spectator?: boolean }) => void;
   onDeck: (deckId: DeckId, custom?: string[]) => void;
+  onLeave: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const nameRef = useRef<HTMLInputElement>(null);
@@ -116,7 +117,7 @@ export function SettingsDialog({
         {deckChanged && <p className="muted small">Changing the deck clears everyone’s votes for this round.</p>}
 
         <div className="dialog-actions">
-          <button type="button" className="btn danger-text" onClick={() => navigate('/')}>
+          <button type="button" className="btn danger-text" onClick={onLeave}>
             Leave room
           </button>
           <div className="row">

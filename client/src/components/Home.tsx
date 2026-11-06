@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { DECKS, LIMITS, type DeckId } from '../../../shared/protocol.ts';
 import { loadIdentity, saveIdentity } from '../lib/identity.ts';
+import { parseInvite } from '../lib/invite.ts';
+import { markJoined } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
 import { parseCustomInput } from './deck.ts';
 
@@ -34,6 +36,8 @@ export function Home() {
       });
       const body = (await res.json()) as { id?: string; error?: string };
       if (!res.ok || !body.id) throw new Error(body.error ?? 'Could not create a room.');
+      // The creator just typed their name here, so skip the join dialog for this room.
+      if (name.trim()) markJoined(body.id);
       navigate(`/r/${body.id}`);
     } catch (err) {
       setError((err as Error).message);
@@ -43,9 +47,11 @@ export function Home() {
 
   function join(e: FormEvent) {
     e.preventDefault();
-    const m = /([1-9A-HJ-NP-Za-km-z]{10})\/?\s*$/.exec(joinCode.trim());
-    if (m) navigate(`/r/${m[1]}`);
-    else setError('That doesn’t look like a room link.');
+    const id = parseInvite(joinCode, location.host);
+    if (id) {
+      if (name.trim()) saveIdentity({ name: name.trim() });
+      navigate(`/r/${id}`);
+    } else setError('That doesn’t look like a room link.');
   }
 
   return (
