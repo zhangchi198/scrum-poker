@@ -849,3 +849,338 @@ describe('game state and join flow', () => {
     });
   });
 });
+
+describe('undo, facilitator lock, ghost seats (over WebSockets)', () => {
+  type Client = Awaited<ReturnType<typeof client>>;
+  const SECRET_A = 'q7xA';
+  const SECRET_B = 'q8yB';
+
+  /** Round-trips a ping so every earlier reply on this socket has arrived. */
+  async function sync(c: Client) {
+    c.send({ t: 'ping' });
+    await c.next('pong');
+  }
+
+  async function lobby(opts: Parameters<typeof createApp>[0] = {}) {
+    const s = await start(opts);
+    const roomId = (await createRoom(s.base, { deckId: 'custom', custom: [SECRET_A, SECRET_B, '?'] })).body.id!;
+    const join = async (clientId: string, name: string, spectator = false) => {
+      const c = await client(s.ws);
+      c.send({ t: 'join', roomId, clientId, name, spectator });
+      const w = await c.next('welcome');
+      return { c, you: w.you };
+    };
+    const a = await join(ID_A, 'Alice');
+    const b = await join(ID_B, 'Bob');
+    await a.c.next('state', (m) => m.room.participants.length === 2);
+    return { ...s, roomId, join, a, b };
+  }
+
+  /** The last room view a client has been sent. */
+  const lastState = (c: Client) => {
+    const msgs = c.raw.map((r) => JSON.parse(r) as ServerMsg).filter((m) => m.t === 'state' || m.t === 'welcome');
+    return (msgs.at(-1) as Extract<ServerMsg, { t: 'state' | 'welcome' }>).room;
+  };
+
+  it('undoes a new round for everyone, announces it, and never leaks a vote before the reveal', async () => {
+    const clock = fakeClock();
+    const { a, b } = await lobby({ now: clock.now });
+    a.c.send({ t: 'vote', value: SECRET_A });
+    b.c.send({ t: 'vote', value: SECRET_B });
+    await b.c.next('state', (m) => m.room.participants.every((p) => p.voted));
+    a.c.send({ t: 'reset' });
+    const after = await b.c.next('state', (m) => m.room.round === 2);
+    expect(after.room.undo).toMatchObject({ kind: 'reset', byName: 'Alice', byId: a.you, until: clock.t + 10_000 });
+    expect(after.room.participants.every((p) => !p.voted)).toBe(true);
+
+    clock.t += 9_000;
+    b.c.send({ t: 'undo' });
+    expect(await a.c.next('notice')).toMatchObject({ kind: 'undone', what: 'reset', byName: 'Bob', byId: b.you });
+    await sync(a.c); // the notice is followed by the restored state
+    const restored = { room: lastState(a.c) };
+    expect(restored.room.round).toBe(1);
+    expect(restored.room.undo).toBeNull();
+    expect(restored.room.revealed).toBe(false);
+    expect(restored.room.participants.every((p) => p.voted)).toBe(true);
+    // Alice sees her own card and nobody else's.
+    expect(restored.room.participants.map((p) => p.vote)).toEqual([SECRET_A, null]);
+
+    // The whole conversation: Bob's card never reached Alice, and Alice's never reached Bob, before the reveal.
+    await sync(a.c);
+    await sync(b.c);
+    for (const [c, me] of [[a.c, a.you], [b.c, b.you]] as const) {
+      for (const raw of c.raw) {
+        const m = JSON.parse(raw) as ServerMsg;
+        if (m.t === 'state' || m.t === 'welcome') for (const p of m.room.participants) if (p.id !== me) expect(p.vote).toBeNull();
+        // Notices and the undo summary carry names only.
+        if (m.t === 'notice') expect(JSON.stringify(m)).not.toMatch(/q7xA|q8yB/);
+      }
+    }
+
+    a.c.send({ t: 'reveal' });
+    const shown = await b.c.next('state', (m) => m.room.revealed);
+    expect(shown.room.participants.map((p) => p.vote)).toEqual([SECRET_A, SECRET_B]);
+  });
+
+  it('refuses to undo after the window or after a new vote, with a friendly error', async () => {
+    const clock = fakeClock();
+    const { a, b } = await lobby({ now: clock.now });
+    a.c.send({ t: 'vote', value: SECRET_A });
+    a.c.send({ t: 'reset' });
+    await b.c.next('state', (m) => m.room.undo !== null);
+
+    clock.t += 10_000; // exactly at the edge: closed
+    b.c.send({ t: 'undo' });
+    expect(await b.c.next('error')).toMatchObject({ code: 'bad_request', message: expect.stringMatching(/Too late/) });
+    expect(lastState(a.c).round).toBe(2);
+
+    clock.t += 1;
+    a.c.send({ t: 'reset' });
+    await b.c.next('state', (m) => m.room.round === 3 && m.room.undo !== null);
+    b.c.send({ t: 'vote', value: SECRET_B }); // someone moves on
+    const moved = await a.c.next('state', (m) => m.room.round === 3 && m.room.participants.some((p) => p.voted));
+    expect(moved.room.undo).toBeNull();
+    a.c.send({ t: 'undo' });
+    expect(await a.c.next('error')).toMatchObject({ code: 'bad_request' });
+    expect(lastState(b.c).round).toBe(3);
+    expect(lastState(b.c).participants.find((p) => p.id === b.you)!.vote).toBe(SECRET_B);
+  });
+
+  it('undoes a deck change, restoring the deck and the votes', async () => {
+    const { a, b } = await lobby();
+    a.c.send({ t: 'vote', value: SECRET_A });
+    a.c.send({ t: 'deck', deckId: 'tshirt' });
+    const changed = await b.c.next('state', (m) => m.room.deckId === 'tshirt');
+    expect(changed.room.undo).toMatchObject({ kind: 'deck', deckLabel: 'T-shirt sizes', byName: 'Alice' });
+    b.c.send({ t: 'undo' });
+    expect(await a.c.next('notice')).toMatchObject({ kind: 'undone', what: 'deck' });
+    await sync(a.c);
+    const back = { room: lastState(a.c) };
+    expect(back.room.deckId).toBe('custom');
+    expect(back.room.cards).toEqual([SECRET_A, SECRET_B, '?']);
+    expect(back.room.participants[0]).toMatchObject({ voted: true, vote: SECRET_A });
+  });
+
+  it('keeps the timer through the reveal, clears it on a new round and brings it back on undo', async () => {
+    const { a, b } = await lobby();
+    a.c.send({ t: 'vote', value: SECRET_A });
+    a.c.send({ t: 'timer', seconds: 120 });
+    await b.c.next('state', (m) => m.room.timer !== null);
+    a.c.send({ t: 'reveal' });
+    const revealed = await b.c.next('state', (m) => m.room.revealed);
+    expect(revealed.room.timer).toMatchObject({ duration: 120 });
+    a.c.send({ t: 'reset' });
+    const fresh = await b.c.next('state', (m) => m.room.round === 2);
+    expect(fresh.room.timer).toBeNull();
+    a.c.send({ t: 'undo' });
+    await b.c.next('notice');
+    await sync(b.c);
+    const undone = { room: lastState(b.c) };
+    expect(undone.room.round).toBe(1);
+    expect(undone.room.timer).toMatchObject({ duration: 120 });
+    expect(undone.room.revealed).toBe(true);
+  });
+
+  describe('facilitator lock', () => {
+    it('is off by default: anyone can do everything', async () => {
+      const { a, b } = await lobby();
+      expect(lastState(a.c)).toMatchObject({ locked: false, facilitatorId: null });
+      b.c.send({ t: 'story', story: 'Open to all' });
+      await a.c.next('state', (m) => m.room.story === 'Open to all');
+    });
+
+    it('rejects every guarded action from non-facilitators, and still allows voting, reacting, profile changes', async () => {
+      const { a, b } = await lobby();
+      a.c.send({ t: 'lock', on: true });
+      const locked = await b.c.next('state', (m) => m.room.locked);
+      expect(locked.room.facilitatorId).toBe(a.you);
+      expect(b.c.raw.join('\n')).not.toContain(ID_A); // the facilitator's clientId stays private
+
+      b.c.send({ t: 'vote', value: SECRET_B }); // voting is open to everyone
+      await a.c.next('state', (m) => m.room.participants.some((p) => p.voted));
+      const attempts: ClientMsg[] = [
+        { t: 'reveal' },
+        { t: 'reset' },
+        { t: 'story', story: 'hijack' },
+        { t: 'deck', deckId: 'tshirt' },
+        { t: 'timer', seconds: 30 },
+        { t: 'timer', seconds: null },
+        { t: 'undo' },
+        { t: 'remove', id: a.you },
+        { t: 'lock', on: false },
+        { t: 'lock', on: true },
+        { t: 'facilitator', id: b.you },
+      ];
+      for (const msg of attempts) {
+        b.c.send(msg);
+        const err = await b.c.next('error');
+        expect(err.code, JSON.stringify(msg)).toBe('forbidden');
+      }
+      expect(lastState(a.c)).toMatchObject({ story: '', revealed: false, round: 1, deckId: 'custom', timer: null, locked: true, facilitatorId: a.you });
+
+      // Still allowed for everyone.
+      b.c.send({ t: 'react', emoji: '🎉' });
+      await a.c.next('reaction');
+      b.c.send({ t: 'profile', name: 'Robert', spectator: true });
+      await a.c.next('state', (m) => m.room.participants.some((p) => p.name === 'Robert' && p.spectator));
+
+      // The facilitator can.
+      a.c.send({ t: 'story', story: 'Mine' });
+      await b.c.next('state', (m) => m.room.story === 'Mine');
+      a.c.send({ t: 'reveal' });
+      await b.c.next('state', (m) => m.room.revealed);
+    });
+
+    it('explains who to ask', async () => {
+      const { a, b } = await lobby();
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      b.c.send({ t: 'reveal' });
+      expect(await b.c.next('error')).toMatchObject({ code: 'forbidden', message: 'Only Alice can reveal the cards while facilitator controls are on.' });
+    });
+
+    it('hands the role over, and the new facilitator can use the controls while the old one cannot', async () => {
+      const { a, b } = await lobby();
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      a.c.send({ t: 'facilitator', id: b.you });
+      const handed = await b.c.next('state', (m) => m.room.facilitatorId === b.you);
+      expect(handed.room.locked).toBe(true);
+      a.c.send({ t: 'reveal' });
+      expect(await a.c.next('error')).toMatchObject({ code: 'forbidden' });
+      b.c.send({ t: 'story', story: 'Bob runs this' });
+      await a.c.next('state', (m) => m.room.story === 'Bob runs this');
+      b.c.send({ t: 'lock', on: false });
+      await a.c.next('state', (m) => !m.room.locked && m.room.facilitatorId === null);
+    });
+
+    it('releases with a notice when the facilitator leaves', async () => {
+      const { a, b } = await lobby();
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      a.c.send({ t: 'leave' });
+      expect(await b.c.next('notice')).toEqual({ t: 'notice', kind: 'facilitator_left' });
+      const open = await b.c.next('state', (m) => !m.room.locked);
+      expect(open.room.facilitatorId).toBeNull();
+      b.c.send({ t: 'story', story: 'Now open' });
+      await b.c.next('state', (m) => m.room.story === 'Now open');
+    });
+
+    it('releases with a notice when the facilitator stays offline past the grace period', async () => {
+      const clock = fakeClock();
+      const { a, b, app } = await lobby({ now: clock.now, graceMs: 90_000 });
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      a.c.ws.close();
+      await b.c.next('state', (m) => m.room.participants.some((p) => !p.connected));
+      clock.t += 60_000;
+      app.sweep();
+      await sync(b.c);
+      expect(lastState(b.c).locked).toBe(true); // still within the grace period: the facilitator may be back
+      clock.t += 31_000;
+      app.sweep();
+      expect(await b.c.next('notice')).toEqual({ t: 'notice', kind: 'facilitator_left' });
+      const open = await b.c.next('state', (m) => !m.room.locked && m.room.participants.length === 1);
+      expect(open.room.facilitatorId).toBeNull();
+    });
+
+    it('survives a reconnect of the facilitator (same client id) without releasing', async () => {
+      const { a, b, join } = await lobby();
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      a.c.ws.close();
+      await b.c.next('state', (m) => m.room.participants.some((p) => !p.connected));
+      const again = await join(ID_A, 'Alice');
+      expect(again.you).toBe(a.you);
+      expect(lastState(again.c)).toMatchObject({ locked: true, facilitatorId: a.you });
+    });
+
+    it('persists across a restart, with old files defaulting to unlocked', async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'poker-'));
+      const dataFile = join(dir, 'rooms.json');
+      const first = await lobby({ dataFile });
+      first.a.c.send({ t: 'lock', on: true });
+      await first.b.c.next('state', (m) => m.room.locked);
+      await first.app.close();
+      apps.splice(apps.indexOf(first.app), 1);
+
+      const saved = JSON.parse(readFileSync(dataFile, 'utf8')) as { rooms: { facilitator?: string | null }[] };
+      expect(saved.rooms[0]!.facilitator).toBe(ID_A);
+
+      const second = await start({ dataFile });
+      const c = await client(second.ws);
+      c.send({ t: 'join', roomId: first.roomId, clientId: ID_B, name: 'Bob', spectator: false });
+      expect((await c.next('welcome')).room).toMatchObject({ locked: true });
+      c.send({ t: 'reveal' });
+      expect(await c.next('error')).toMatchObject({ code: 'forbidden' });
+      await second.app.close();
+      apps.splice(apps.indexOf(second.app), 1);
+
+      // An older file (written before the lock existed) has no facilitator field.
+      delete saved.rooms[0]!.facilitator;
+      writeFileSync(dataFile, JSON.stringify({ version: 2, rooms: saved.rooms, tombstones: [] }));
+      const third = await start({ dataFile });
+      const d = await client(third.ws);
+      d.send({ t: 'join', roomId: first.roomId, clientId: ID_B, name: 'Bob', spectator: false });
+      expect((await d.next('welcome')).room).toMatchObject({ locked: false, facilitatorId: null });
+    });
+  });
+
+  describe('ghost seats', () => {
+    it('exposes a coarse offlineSince for offline seats only', async () => {
+      const clock = fakeClock();
+      clock.t = 1_700_000_123_456;
+      const { a, b } = await lobby({ now: clock.now });
+      b.c.ws.close();
+      const st = await a.c.next('state', (m) => m.room.participants.some((p) => !p.connected));
+      expect(st.room.participants.find((p) => p.id === b.you)!.offlineSince).toBe(1_700_000_123_000);
+      expect(st.room.participants.find((p) => p.id === a.you)!.offlineSince).toBeNull();
+    });
+
+    it('lets anyone remove an offline seat, dropping their vote, and tells the room', async () => {
+      const { a, b, join } = await lobby();
+      const c = await join(ID_C, 'Cara');
+      c.c.send({ t: 'vote', value: SECRET_A });
+      await a.c.next('state', (m) => m.room.participants.length === 3 && m.room.participants.some((p) => p.voted));
+      c.c.ws.close();
+      await a.c.next('state', (m) => m.room.participants.some((p) => !p.connected));
+
+      b.c.send({ t: 'remove', id: c.you });
+      expect(await a.c.next('notice')).toEqual({ t: 'notice', kind: 'removed', byId: b.you, byName: 'Bob', name: 'Cara' });
+      const st = await a.c.next('state', (m) => m.room.participants.length === 2);
+      expect(st.room.participants.some((p) => p.voted)).toBe(false);
+    });
+
+    it('refuses to remove someone who is online, and yourself', async () => {
+      const { a, b } = await lobby();
+      a.c.send({ t: 'remove', id: b.you });
+      expect(await a.c.next('error')).toMatchObject({ code: 'forbidden' });
+      a.c.send({ t: 'remove', id: a.you });
+      expect(await a.c.next('error')).toMatchObject({ code: 'forbidden' });
+      await sync(b.c);
+      expect(lastState(b.c).participants).toHaveLength(2);
+    });
+
+    it('a second tab keeps a seat online, so it cannot be removed', async () => {
+      const { a, b, join } = await lobby();
+      const second = await join(ID_B, 'Bob');
+      b.c.ws.close();
+      await sync(second.c);
+      a.c.send({ t: 'remove', id: second.you });
+      expect(await a.c.next('error')).toMatchObject({ code: 'forbidden' });
+    });
+
+    it('under the facilitator lock only the facilitator can remove an offline seat', async () => {
+      const { a, b, join } = await lobby();
+      const c = await join(ID_C, 'Cara');
+      a.c.send({ t: 'lock', on: true });
+      await b.c.next('state', (m) => m.room.locked);
+      c.c.ws.close();
+      await a.c.next('state', (m) => m.room.participants.some((p) => !p.connected));
+      b.c.send({ t: 'remove', id: c.you });
+      expect(await b.c.next('error')).toMatchObject({ code: 'forbidden' });
+      a.c.send({ t: 'remove', id: c.you });
+      expect(await b.c.next('notice')).toMatchObject({ kind: 'removed', name: 'Cara' });
+    });
+  });
+});

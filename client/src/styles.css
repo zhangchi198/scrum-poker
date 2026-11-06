@@ -1001,7 +1001,7 @@ select:focus {
     opacity: 0.55;
   }
 }
-.timer-stop {
+.timer-btn {
   appearance: none;
   border: none;
   background: none;
@@ -1012,7 +1012,7 @@ select:focus {
   border-radius: 8px;
   cursor: pointer;
 }
-.timer-stop:hover {
+.timer-btn:hover {
   background: var(--surface-2);
 }
 
@@ -1141,7 +1141,7 @@ select:focus {
     min-width: 44px;
     min-height: 44px;
   }
-  .timer-stop {
+  .timer-btn {
     min-width: 44px;
     min-height: 44px;
   }
@@ -1331,4 +1331,126 @@ a.btn {
 }
 .panel.join .join-context {
   margin-bottom: 6px;
+}
+
+/* ---------- facilitator, undo, ghost seats ---------- */
+.seat-badge {
+  display: inline-block;
+  margin-top: 2px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+}
+.seat-away {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.seat-tip.has-actions {
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+  pointer-events: auto;
+  top: 100%;
+}
+.seat-tip.has-actions.above {
+  top: auto;
+  bottom: 100%;
+}
+/* Invisible bridge so the pointer can travel from the seat to the buttons without the tooltip closing. */
+.seat-tip.has-actions::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  height: 8px;
+}
+.seat-tip.has-actions.above::before {
+  top: auto;
+  bottom: -8px;
+}
+.tip-action {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--bg) 45%, transparent);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 4px 10px;
+  min-height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tip-action:hover,
+.tip-action:focus-visible {
+  background: color-mix(in srgb, var(--bg) 25%, transparent);
+}
+.control-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+.story-input[readonly] {
+  cursor: not-allowed;
+  opacity: 0.85;
+}
+.facilitator-box {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 0;
+  padding: 8px 12px 10px;
+  display: grid;
+  gap: 4px;
+}
+.facilitator-box legend {
+  padding: 0 6px;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.toast.with-action {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.toast-btn {
+  appearance: none;
+  border: 1px solid color-mix(in srgb, var(--bg) 55%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 800;
+  padding: 2px 12px;
+  min-height: 28px;
+  cursor: pointer;
+}
+.toast-btn:hover,
+.toast-btn:focus-visible {
+  background: color-mix(in srgb, var(--bg) 25%, transparent);
+}
+.timer-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.menu button.menu-chime {
+  border-top: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  margin-top: 4px;
+}
+@media (pointer: coarse) {
+  .toast-btn,
+  .tip-action {
+    min-height: 44px;
+    min-width: 44px;
+  }
 }

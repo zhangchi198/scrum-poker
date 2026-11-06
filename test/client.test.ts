@@ -11,6 +11,10 @@ import { parseInvite, roomIdFromPath } from '../client/src/lib/invite.ts';
 import { JOINED_CAP, addJoined } from '../client/src/lib/joined.ts';
 import { blurResult, draftForRemote } from '../client/src/lib/story.ts';
 import { nudgeTargets, tallyVotes, voteStatus } from '../client/src/lib/tally.ts';
+import { canControl, controlHint, facilitatorName } from '../client/src/lib/permissions.ts';
+import { RECONNECTING_MS, awayText } from '../client/src/lib/presence.ts';
+import { lockAnnouncement, noticeText, undoToastText } from '../client/src/lib/notices.ts';
+import { CHIME_NOTES, chimeEnabled, playChime, setChimeEnabled } from '../client/src/lib/chime.ts';
 
 const ID = 'abcdefghij'; // 10 base58 characters
 const HOST = 'poker.example.com';
@@ -77,7 +81,7 @@ describe('addJoined', () => {
 });
 
 function p(id: string, o: Partial<ParticipantView> = {}): ParticipantView {
-  return { id, name: id, spectator: false, connected: true, voted: false, vote: null, ...o };
+  return { id, name: id, spectator: false, connected: true, offlineSince: null, voted: false, vote: null, ...o };
 }
 
 describe('vote tally and nudge targets', () => {
@@ -226,5 +230,139 @@ describe('title flash', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('canControl / controlHint', () => {
+  const people = [p('alex', { name: 'Alex' }), p('bo', { name: 'Bo' })];
+  const open = { locked: false, facilitatorId: null, participants: people };
+  const locked = { locked: true, facilitatorId: 'alex', participants: people };
+
+  it('lets everyone act while unlocked', () => {
+    expect(canControl(open, 'bo')).toBe(true);
+    expect(canControl(open, null)).toBe(true);
+    expect(controlHint(open, 'bo', 'reveal')).toBeNull();
+  });
+
+  it('lets only the facilitator act while locked', () => {
+    expect(canControl(locked, 'alex')).toBe(true);
+    expect(canControl(locked, 'bo')).toBe(false);
+    expect(canControl(locked, null)).toBe(false);
+    expect(facilitatorName(locked)).toBe('Alex');
+    expect(facilitatorName(open)).toBeNull();
+  });
+
+  it('words the hint for the people who are locked out', () => {
+    expect(controlHint(locked, 'bo', 'reveal')).toBe('Only Alex can reveal');
+    expect(controlHint(locked, 'bo', 'run the timer')).toBe('Only Alex can run the timer');
+    expect(controlHint(locked, 'alex', 'reveal')).toBeNull();
+    expect(controlHint({ ...locked, participants: [] }, 'bo', 'reveal')).toBe('Only the facilitator can reveal');
+  });
+});
+
+describe('awayText', () => {
+  const since = 1_000_000;
+  it('says reconnecting for the first 15 seconds, then how long they have been away', () => {
+    expect(awayText(null, since + 1000)).toBe('');
+    expect(awayText(since, since)).toBe('reconnecting…');
+    expect(awayText(since, since + RECONNECTING_MS - 1)).toBe('reconnecting…');
+    expect(awayText(since, since + RECONNECTING_MS)).toBe('away 15s');
+    expect(awayText(since, since + 59_999)).toBe('away 59s');
+    expect(awayText(since, since + 60_000)).toBe('away 1m');
+    expect(awayText(since, since + 5 * 60_000 + 30_000)).toBe('away 5m');
+    expect(awayText(since, since + 3 * 3600_000)).toBe('away 3h');
+    expect(awayText(since, since + 49 * 3600_000)).toBe('away 2d');
+  });
+
+  it('never goes negative when clocks disagree slightly', () => {
+    expect(awayText(since, since - 5000)).toBe('reconnecting…');
+  });
+});
+
+describe('undo and notice text', () => {
+  const reset = { kind: 'reset', until: 1, byId: 'a', byName: 'Alex' } as const;
+  const deck = { kind: 'deck', until: 1, byId: 'a', byName: 'Alex', deckLabel: 'T-shirt sizes' } as const;
+
+  it('builds the undo toast for everyone, and "You" for the actor', () => {
+    expect(undoToastText(reset, 'b')).toBe('Alex started a new round');
+    expect(undoToastText(reset, 'a')).toBe('You started a new round');
+    expect(undoToastText(deck, 'b')).toBe('Alex changed the deck to T-shirt sizes');
+    expect(undoToastText(deck, 'a')).toBe('You changed the deck to T-shirt sizes');
+  });
+
+  it('builds the follow-up notices', () => {
+    expect(noticeText({ t: 'notice', kind: 'undone', what: 'reset', byId: 'a', byName: 'Alex' }, 'b')).toBe('Alex undid the new round');
+    expect(noticeText({ t: 'notice', kind: 'undone', what: 'deck', byId: 'a', byName: 'Alex' }, 'a')).toBe('You undid the deck change');
+    expect(noticeText({ t: 'notice', kind: 'removed', byId: 'a', byName: 'Alex', name: 'Bob' }, 'c')).toBe('Alex removed Bob (offline)');
+    expect(noticeText({ t: 'notice', kind: 'removed', byId: 'a', byName: 'Alex', name: 'Bob' }, 'a')).toBe('You removed Bob (offline)');
+    expect(noticeText({ t: 'notice', kind: 'facilitator_left' }, 'c')).toBe('Facilitator left — controls are open to everyone');
+  });
+
+  it('announces lock changes, and nothing when nothing changed', () => {
+    const off = { locked: false, facilitatorId: null };
+    const alex = { locked: true, facilitatorId: 'a' };
+    const bo = { locked: true, facilitatorId: 'b' };
+    const name = (id: string | null) => (id === 'a' ? 'Alex' : 'Bo');
+    expect(lockAnnouncement(off, off, name, 'a')).toBeNull();
+    expect(lockAnnouncement(alex, alex, name, 'a')).toBeNull();
+    expect(lockAnnouncement(off, alex, name, 'b')).toBe('Facilitator controls are on. Alex is the facilitator.');
+    expect(lockAnnouncement(off, alex, name, 'a')).toBe('Facilitator controls are on. You are the facilitator.');
+    expect(lockAnnouncement(alex, bo, name, 'a')).toBe('Bo is now the facilitator.');
+    expect(lockAnnouncement(alex, off, name, 'a')).toBe('Facilitator controls are off. Everyone can use the controls.');
+  });
+});
+
+describe('chime preference', () => {
+  const memory = () => {
+    const m = new Map<string, string>();
+    return { getItem: (k: string) => m.get(k) ?? null, setItem: (k: string, v: string) => void m.set(k, v) };
+  };
+
+  it('defaults to on and remembers the choice', () => {
+    const store = memory();
+    expect(chimeEnabled(store)).toBe(true);
+    setChimeEnabled(false, store);
+    expect(chimeEnabled(store)).toBe(false);
+    setChimeEnabled(true, store);
+    expect(chimeEnabled(store)).toBe(true);
+  });
+
+  it('still works (on) when storage is blocked or throws', () => {
+    const broken = {
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => {
+        throw new Error('blocked');
+      },
+    };
+    expect(chimeEnabled(broken)).toBe(true);
+    expect(() => setChimeEnabled(false, broken)).not.toThrow();
+    expect(chimeEnabled(null)).toBe(true);
+  });
+
+  it('stays silent and never throws before the user has interacted or where WebAudio is missing', () => {
+    expect(playChime()).toBe(false);
+  });
+
+  it('is a short, soft two-note tone', () => {
+    expect(CHIME_NOTES).toHaveLength(2);
+    expect(CHIME_NOTES[1]!.at).toBeLessThan(0.5);
+  });
+});
+
+describe('title flasher (until focus)', () => {
+  it('can flash until cleared, restoring the exact title', () => {
+    vi.useFakeTimers();
+    const doc = { title: 'Story — A · Scrum Poker' };
+    const t = createTitleFlasher(doc, 1000);
+    t.flash("⏰ Time's up", Infinity);
+    vi.advanceTimersByTime(60_000);
+    expect(doc.title).toBe("⏰ Time's up — Story — A · Scrum Poker");
+    t.clear();
+    expect(doc.title).toBe('Story — A · Scrum Poker');
+    t.clear(); // harmless when nothing is flashing
+    expect(doc.title).toBe('Story — A · Scrum Poker');
+    vi.useRealTimers();
   });
 });

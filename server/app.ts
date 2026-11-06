@@ -265,6 +265,16 @@ export function createApp(opts: AppOptions = {}) {
     }
   }
 
+  /** Sends a one-off event (a toast on the client) to everyone in the room. Carries names only, never a vote. */
+  function notify(room: Room, msg: ServerMsg) {
+    for (const o of conns) if (o.room === room) send(o.ws, msg);
+  }
+
+  /** The safety valve: if the facilitator's seat is gone (left, pruned, removed) the lock opens up for everyone. */
+  function releaseFacilitatorIfGone(room: Room) {
+    if (room.releaseIfFacilitatorGone()) notify(room, { t: 'notice', kind: 'facilitator_left' });
+  }
+
   function takeToken(c: Conn): boolean {
     const now = clock();
     c.tokens = Math.min(BUCKET_SIZE, c.tokens + ((now - c.lastRefill) / 1000) * REFILL_PER_SEC);
@@ -368,17 +378,41 @@ export function createApp(opts: AppOptions = {}) {
         if (room.vote(clientId, msg.value ?? null, clock())) broadcastState(room);
         return;
       case 'reveal':
+        room.guard(clientId, 'reveal');
         if (room.reveal(clock())) broadcastState(room);
         return;
       case 'reset':
-        room.reset(clock());
+        room.guard(clientId, 'reset');
+        room.reset(clock(), clientId);
         return broadcastState(room);
       case 'story':
+        room.guard(clientId, 'story');
         if (room.setStory(msg.story, clock())) broadcastState(room);
         return;
       case 'deck':
-        room.setDeck(msg.deckId, msg.custom, clock());
+        room.guard(clientId, 'deck');
+        room.setDeck(msg.deckId, msg.custom, clock(), clientId);
         return broadcastState(room);
+      case 'undo': {
+        room.guard(clientId, 'undo');
+        const { what } = room.undo(clock());
+        notify(room, { t: 'notice', kind: 'undone', what, byId: me.publicId, byName: me.name });
+        return broadcastState(room);
+      }
+      case 'lock':
+        if (room.setLocked(clientId, msg.on === true, clock())) broadcastState(room);
+        return;
+      case 'facilitator':
+        if (room.handOff(clientId, msg.id, clock())) broadcastState(room);
+        return;
+      case 'remove': {
+        room.guard(clientId, 'remove');
+        const gone = room.removeOffline(clientId, msg.id, clock());
+        if (!gone) return;
+        notify(room, { t: 'notice', kind: 'removed', byId: me.publicId, byName: me.name, name: gone.name });
+        releaseFacilitatorIfGone(room);
+        return broadcastState(room);
+      }
       case 'profile':
         if (room.setProfile(clientId, msg.name, msg.spectator, clock())) broadcastState(room);
         return;
@@ -387,9 +421,11 @@ export function createApp(opts: AppOptions = {}) {
         room.remove(clientId, clock());
         c.room = null;
         c.clientId = null;
+        releaseFacilitatorIfGone(room);
         return broadcastState(room);
       }
       case 'timer':
+        room.guard(clientId, 'timer');
         room.setTimer(msg.seconds, clock());
         return broadcastState(room);
       case 'react': {
@@ -706,7 +742,10 @@ export function createApp(opts: AppOptions = {}) {
   /** Prunes offline seats, retires idle rooms to tombstones, and forgets old tombstones. */
   function sweep(now = clock()) {
     for (const [id, room] of rooms) {
-      if (room.prune(now, graceMs)) broadcastState(room);
+      if (room.prune(now, graceMs)) {
+        releaseFacilitatorIfGone(room);
+        broadcastState(room);
+      }
       if (room.isExpired(now, roomTtlMs)) {
         rooms.delete(id);
         retire(room);

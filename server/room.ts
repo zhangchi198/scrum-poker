@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { DECKS, LIMITS, type DeckId, type RoomView, type TimerView } from '../shared/protocol.ts';
+import { DECKS, LIMITS, UNDO_WINDOW_MS, type DeckId, type RoomView, type TimerView, type UndoView } from '../shared/protocol.ts';
 import { cleanText } from '../shared/text.ts';
 
 export { cleanText };
@@ -15,8 +15,8 @@ export interface Participant {
 }
 
 export class RoomError extends Error {
-  readonly code: 'room_full' | 'bad_request';
-  constructor(code: 'room_full' | 'bad_request', message: string) {
+  readonly code: 'room_full' | 'bad_request' | 'forbidden';
+  constructor(code: 'room_full' | 'bad_request' | 'forbidden', message: string) {
     super(message);
     this.code = code;
   }
@@ -51,6 +51,8 @@ export interface RoomSnapshot {
   revealed: boolean;
   round: number;
   timer: TimerView | null;
+  /** clientId of the facilitator while the lock is on. Absent in files written before the lock existed. */
+  facilitator?: string | null;
   lastActivity: number;
   participants: [string, Omit<Participant, 'connections' | 'disconnectedAt'>][];
 }
@@ -81,6 +83,34 @@ export function isTombstone(t: unknown): t is Tombstone {
   return typeof o.id === 'string' && isDeck(o.deckId, o.cards) && typeof o.lastActivity === 'number' && Number.isFinite(o.lastActivity);
 }
 
+/** Private server-side copy of the round before a destructive action. Holds votes, so it never leaves the server. */
+interface UndoRecord {
+  kind: 'reset' | 'deck';
+  expiresAt: number;
+  byId: string;
+  byName: string;
+  deckLabel?: string;
+  revealed: boolean;
+  round: number;
+  timer: TimerView | null;
+  deckId: DeckId;
+  cards: string[];
+  votes: Map<string, string | null>;
+}
+
+export type Guarded = 'reveal' | 'reset' | 'deck' | 'story' | 'timer' | 'undo' | 'remove';
+const GUARD_VERB: Record<Guarded, string> = {
+  reveal: 'reveal the cards',
+  reset: 'start a new round',
+  deck: 'change the deck',
+  story: 'edit the story',
+  timer: 'run the timer',
+  undo: 'undo',
+  remove: 'remove people',
+};
+
+const deckName = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
+
 export class Room {
   readonly id: string;
   story = '';
@@ -91,6 +121,9 @@ export class Room {
   timer: TimerView | null = null;
   lastActivity: number;
   lastNudgeAt = 0;
+  /** clientId (private) of the facilitator while the lock is on; null means everyone may use the controls. */
+  facilitator: string | null = null;
+  private undoRecord: UndoRecord | null = null;
   readonly participants = new Map<string, Participant>();
 
   constructor(id: string, now = Date.now()) {
@@ -100,6 +133,105 @@ export class Room {
 
   private touch(now: number) {
     this.lastActivity = now;
+  }
+
+  /** Anything that changes the round invalidates the pending undo, so Undo can never clobber newer activity. */
+  private roundChanged() {
+    this.undoRecord = null;
+  }
+
+  // ---------- facilitator lock ----------
+  canControl(clientId: string): boolean {
+    return this.facilitator === null || this.facilitator === clientId;
+  }
+
+  /** Throws a friendly `forbidden` error if the lock is on and `clientId` is not the facilitator. */
+  guard(clientId: string, action: Guarded) {
+    if (this.canControl(clientId)) return;
+    const name = this.participants.get(this.facilitator!)?.name ?? 'the facilitator';
+    throw new RoomError('forbidden', `Only ${name} can ${GUARD_VERB[action]} while facilitator controls are on.`);
+  }
+
+  /** Turning it on makes `clientId` the facilitator. Turning it off is the facilitator's call. Returns true if anything changed. */
+  setLocked(clientId: string, on: boolean, now = Date.now()): boolean {
+    if (!this.participants.has(clientId)) return false;
+    if (on) {
+      if (this.facilitator === clientId) return false;
+      if (this.facilitator !== null) throw new RoomError('forbidden', 'Facilitator controls are already on.');
+      this.facilitator = clientId;
+    } else {
+      if (this.facilitator === null) return false;
+      if (this.facilitator !== clientId) throw new RoomError('forbidden', 'Only the facilitator can turn facilitator controls off.');
+      this.facilitator = null;
+    }
+    this.touch(now);
+    return true;
+  }
+
+  /** The facilitator hands the role to another connected participant (by public id). */
+  handOff(clientId: string, targetPublicId: unknown, now = Date.now()): boolean {
+    if (this.facilitator === null || this.facilitator !== clientId) {
+      throw new RoomError('forbidden', 'Only the facilitator can hand over the role.');
+    }
+    const target = [...this.participants].find(([, p]) => p.publicId === targetPublicId);
+    if (!target) throw new RoomError('bad_request', 'That person is no longer in the room.');
+    if (target[1].connections === 0) throw new RoomError('bad_request', 'That person is offline.');
+    if (target[0] === clientId) return false;
+    this.facilitator = target[0];
+    this.touch(now);
+    return true;
+  }
+
+  /** If the facilitator's seat is gone, the lock releases so nobody is stuck. Returns true if it did. */
+  releaseIfFacilitatorGone(): boolean {
+    if (this.facilitator !== null && !this.participants.has(this.facilitator)) {
+      this.facilitator = null;
+      return true;
+    }
+    return false;
+  }
+
+  // ---------- undo ----------
+  private captureUndo(kind: 'reset' | 'deck', actor: string, deckLabel?: string): UndoRecord | null {
+    const by = this.participants.get(actor);
+    if (!by) return null;
+    return {
+      kind,
+      expiresAt: 0,
+      byId: by.publicId,
+      byName: by.name,
+      deckLabel,
+      revealed: this.revealed,
+      round: this.round,
+      timer: this.timer,
+      deckId: this.deckId,
+      cards: this.cards,
+      votes: new Map([...this.participants].map(([cid, p]) => [cid, p.vote])),
+    };
+  }
+
+  private liveUndo(now: number): UndoRecord | null {
+    if (this.undoRecord && now >= this.undoRecord.expiresAt) this.undoRecord = null;
+    return this.undoRecord;
+  }
+
+  /** Restores the state before the last "new round" / "change deck", if nothing has changed the round since. */
+  undo(now = Date.now()): { what: 'reset' | 'deck' } {
+    const u = this.liveUndo(now);
+    if (!u) throw new RoomError('bad_request', 'Too late to undo. The round has moved on.');
+    this.undoRecord = null;
+    this.revealed = u.revealed;
+    this.round = u.round;
+    this.deckId = u.deckId;
+    this.cards = u.cards;
+    if (u.kind === 'reset' && this.timer === null) this.timer = u.timer;
+    for (const [cid, p] of this.participants) {
+      const v = u.votes.get(cid) ?? null;
+      // Before the reveal a spectator holds no vote (they may have switched since the snapshot).
+      p.vote = p.spectator && !this.revealed ? null : v;
+    }
+    this.touch(now);
+    return { what: u.kind };
   }
 
   get connectedCount(): number {
@@ -117,6 +249,7 @@ export class Room {
     if (this.connectedCount === 0 && now - this.lastActivity >= staleAfterMs) {
       this.reset(now);
       this.participants.clear();
+      this.facilitator = null;
     }
     const name = cleanText(rawName, LIMITS.nameLength) || 'Anonymous';
     let p = this.participants.get(clientId);
@@ -130,7 +263,7 @@ export class Room {
       p.name = name;
       p.spectator = spectator;
       // After the reveal the vote is part of the shown results, so it stays; before it, spectators hold no vote.
-      if (spectator && !this.revealed) p.vote = null;
+      if (spectator && !this.revealed) this.clearVote(p);
     }
     p.connections++;
     p.disconnectedAt = null;
@@ -146,11 +279,31 @@ export class Room {
     this.touch(now);
   }
 
+  private clearVote(p: Participant) {
+    if (p.vote !== null) {
+      p.vote = null;
+      this.roundChanged();
+    }
+  }
+
   /** Removes a participant right away (no grace period), e.g. when they press "Leave room". */
   remove(clientId: string, now = Date.now()): boolean {
-    if (!this.participants.delete(clientId)) return false;
+    const p = this.participants.get(clientId);
+    if (!p) return false;
+    if (p.vote !== null) this.roundChanged();
+    this.participants.delete(clientId);
     this.touch(now);
     return true;
+  }
+
+  /** Someone removes an offline seat (by public id). Online people can never be removed this way. */
+  removeOffline(actorClientId: string, targetPublicId: unknown, now = Date.now()): { name: string } | null {
+    const target = [...this.participants].find(([, p]) => p.publicId === targetPublicId);
+    if (!target) return null; // already gone: nothing to do
+    const [cid, p] = target;
+    if (cid === actorClientId || p.connections > 0) throw new RoomError('forbidden', `${p.name} is online, so they can’t be removed.`);
+    this.remove(cid, now);
+    return { name: p.name };
   }
 
   /** Drops participants that have been offline longer than the grace period. Returns true if anything changed. */
@@ -158,6 +311,7 @@ export class Room {
     let changed = false;
     for (const [id, p] of this.participants) {
       if (p.connections === 0 && p.disconnectedAt !== null && now - p.disconnectedAt > graceMs) {
+        if (p.vote !== null) this.roundChanged();
         this.participants.delete(id);
         changed = true;
       }
@@ -187,6 +341,7 @@ export class Room {
     if (value !== null && !this.cards.includes(value)) throw new RoomError('bad_request', 'That card is not in this deck.');
     if (p.vote === value) return false;
     p.vote = value;
+    this.roundChanged();
     this.touch(now);
     return true;
   }
@@ -194,16 +349,20 @@ export class Room {
   reveal(now = Date.now()): boolean {
     if (this.revealed) return false;
     this.revealed = true;
-    this.timer = null;
+    this.roundChanged();
     this.touch(now);
     return true;
   }
 
-  reset(now = Date.now()) {
+  /** `actor` (a clientId) makes the reset undoable for UNDO_WINDOW_MS; internal resets are not. */
+  reset(now = Date.now(), actor?: string) {
+    const undo = actor ? this.captureUndo('reset', actor) : null;
     for (const p of this.participants.values()) p.vote = null;
     this.revealed = false;
-    this.timer = null;
+    this.timer = null; // the timer belongs to the round; Undo brings it back
     this.round++;
+    this.roundChanged();
+    if (undo) this.undoRecord = { ...undo, expiresAt: now + UNDO_WINDOW_MS };
     this.touch(now);
   }
 
@@ -215,18 +374,21 @@ export class Room {
     return true;
   }
 
-  setDeck(deckId: unknown, custom: unknown, now = Date.now()) {
+  setDeck(deckId: unknown, custom: unknown, now = Date.now(), actor?: string) {
     let cards: string[] | null = null;
     if (deckId === 'custom') cards = parseCustomDeck(custom);
     else if (typeof deckId === 'string' && Object.hasOwn(DECKS, deckId)) cards = [...DECKS[deckId as keyof typeof DECKS].cards];
     if (!cards) {
       throw new RoomError('bad_request', `A custom deck needs 2–${LIMITS.customCards} distinct cards of up to ${LIMITS.customCardLength} characters.`);
     }
+    const undo = actor ? this.captureUndo('deck', actor, deckName(deckId as DeckId)) : null;
     this.deckId = deckId as DeckId;
     this.cards = cards;
     // Votes from the old deck are meaningless now.
     for (const p of this.participants.values()) p.vote = null;
     this.revealed = false;
+    this.roundChanged();
+    if (undo) this.undoRecord = { ...undo, expiresAt: now + UNDO_WINDOW_MS };
     this.touch(now);
   }
 
@@ -236,7 +398,7 @@ export class Room {
     if (name !== undefined) p.name = cleanText(name, LIMITS.nameLength) || p.name;
     if (typeof spectator === 'boolean') {
       p.spectator = spectator;
-      if (spectator && !this.revealed) p.vote = null; // a revealed vote is part of the results; don't rewrite them
+      if (spectator && !this.revealed) this.clearVote(p); // a revealed vote is part of the results; don't rewrite them
     }
     this.touch(now);
     return true;
@@ -262,6 +424,10 @@ export class Room {
   }
 
   view(forClientId: string | null, now = Date.now()): RoomView {
+    const u = this.liveUndo(now);
+    const undo: UndoView | null = u
+      ? { kind: u.kind, until: u.expiresAt, byId: u.byId, byName: u.byName, ...(u.deckLabel ? { deckLabel: u.deckLabel } : {}) }
+      : null;
     return {
       id: this.id,
       story: this.story,
@@ -270,12 +436,16 @@ export class Room {
       revealed: this.revealed,
       round: this.round,
       timer: this.timer,
+      facilitatorId: this.facilitator === null ? null : (this.participants.get(this.facilitator)?.publicId ?? null),
+      locked: this.facilitator !== null && this.participants.has(this.facilitator),
+      undo,
       now,
       participants: [...this.participants].map(([cid, p]) => ({
         id: p.publicId,
         name: p.name,
         spectator: p.spectator,
         connected: p.connections > 0,
+        offlineSince: p.connections > 0 || p.disconnectedAt === null ? null : Math.floor(p.disconnectedAt / 1000) * 1000,
         voted: p.vote !== null,
         vote: this.revealed || cid === forClientId ? p.vote : null,
       })),
@@ -291,6 +461,7 @@ export class Room {
       revealed: this.revealed,
       round: this.round,
       timer: this.timer,
+      facilitator: this.facilitator,
       lastActivity: this.lastActivity,
       participants: [...this.participants].map(([cid, p]) => [
         cid,
@@ -311,6 +482,8 @@ export class Room {
     room.revealed = s.revealed;
     room.round = s.round;
     room.timer = s.timer;
+    // Older files have no facilitator; an unknown one (seat gone) means the lock is off.
+    room.facilitator = typeof s.facilitator === 'string' && s.participants.some(([cid]) => cid === s.facilitator) ? s.facilitator : null;
     for (const [cid, p] of s.participants) {
       room.participants.set(cid, { ...p, connections: 0, disconnectedAt: now });
     }

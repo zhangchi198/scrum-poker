@@ -4,6 +4,9 @@ import { IDENTITY_KEY, loadIdentity, saveIdentity } from '../lib/identity.ts';
 import { forgetJoined, hasJoined, markJoined, readSpectator, writeSpectator } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
 import { NEW_ROUND_MESSAGE, progressDelay, revealMessage } from '../lib/announce.ts';
+import { watchInteraction, playChime } from '../lib/chime.ts';
+import { lockAnnouncement, noticeText, undoToastText } from '../lib/notices.ts';
+import { canControl, controlHint } from '../lib/permissions.ts';
 import { cardLen, formatNumber } from '../lib/format.ts';
 import { displayNames } from '../lib/names.ts';
 import { nudgeTargets, tallyVotes, voteStatus } from '../lib/tally.ts';
@@ -70,6 +73,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
     setTimeout(() => setFloaters((f) => f.filter((x) => x.key !== key)), 2800);
   }, []);
 
+  const youRef = useRef<string | null>(null);
   const getJoinInfo = useCallback(() => ({ ...loadIdentity(), spectator: spectatorRef.current }), []);
   const { room, you, status, fatal, joinError, retry, clockOffset, send } = useRoom(roomId, joined, getJoinInfo, {
     onReaction: (r) => float(r.emoji, r.name),
@@ -79,8 +83,10 @@ export function RoomPage({ roomId }: { roomId: string }) {
       navigator.vibrate?.(200);
       titles.flash('👋 Your vote!');
     },
+    onNotice: (n) => toast(noticeText(n, youRef.current)),
     onError: (_code, message) => toast(message),
   });
+  youRef.current = you;
 
   const me = room?.participants.find((p) => p.id === you) ?? null;
   const players = useMemo(() => room?.participants.filter((p) => !p.spectator) ?? [], [room]);
@@ -184,6 +190,56 @@ export function RoomPage({ roomId }: { roomId: string }) {
     titles.setBase(room?.story ? `${room.story} · Scrum Poker` : 'Scrum Poker');
   }, [room?.story]);
 
+  // Sound can only start after a gesture; the flashing title stops as soon as the tab is looked at again.
+  useEffect(() => {
+    const stopWatching = watchInteraction();
+    const back = () => !document.hidden && titles.clear();
+    window.addEventListener('focus', back);
+    document.addEventListener('visibilitychange', back);
+    return () => {
+      stopWatching();
+      window.removeEventListener('focus', back);
+      document.removeEventListener('visibilitychange', back);
+    };
+  }, []);
+
+  const onTimeUp = useCallback(() => {
+    playChime();
+    if (document.hidden || !document.hasFocus()) titles.flash('\u23f0 Time\u0027s up', Infinity);
+  }, []);
+
+  // The Undo toast lives as long as the server's window; re-render when it closes.
+  const undo = room?.undo ?? null;
+  const [, setUndoTick] = useState(0);
+  const undoUntil = undo?.until ?? null;
+  const clockOffsetRef = useRef(clockOffset);
+  clockOffsetRef.current = clockOffset;
+  useEffect(() => {
+    if (undoUntil === null) return;
+    const id = setTimeout(() => setUndoTick((n) => n + 1), Math.max(0, undoUntil - (Date.now() + clockOffsetRef.current)) + 50);
+    return () => clearTimeout(id);
+  }, [undoUntil]);
+  const undoOpen = !!undo && undo.until > Date.now() + clockOffset;
+
+  // Say it out loud when the facilitator lock turns on, off, or changes hands.
+  const prevLock = useRef<{ locked: boolean; facilitatorId: string | null } | null>(null);
+  const locked = room?.locked ?? null;
+  const facilitatorId = room?.facilitatorId ?? null;
+  const participantsRef = useRef(room?.participants);
+  participantsRef.current = room?.participants;
+  useEffect(() => {
+    if (locked === null) return;
+    const next = { locked, facilitatorId };
+    const prev = prevLock.current;
+    prevLock.current = next;
+    if (!prev) return;
+    const msg = lockAnnouncement(prev, next, (id) => participantsRef.current?.find((p) => p.id === id)?.name ?? 'Someone', youRef.current);
+    if (msg) {
+      lastAnnounced.current = Date.now();
+      setAnnouncement(msg);
+    }
+  }, [locked, facilitatorId]);
+
   // Before asking for a name, check the room exists (and get context for the dialog).
   useEffect(() => {
     if (joined) return;
@@ -272,6 +328,16 @@ export function RoomPage({ roomId }: { roomId: string }) {
     );
   }
 
+  const can = canControl(room, you);
+  const iAmFacilitator = room.locked && room.facilitatorId === you;
+  const revealHint = controlHint(room, you, 'reveal');
+  const resetHint = controlHint(room, you, 'start a new round');
+  const seatProps = (p: (typeof players)[number]) => ({
+    isFacilitator: room.locked && p.id === room.facilitatorId,
+    clockOffset,
+    onMakeFacilitator: iAmFacilitator && p.id !== you && p.connected ? () => send({ t: 'facilitator', id: p.id }) : undefined,
+    onRemove: !p.connected && can ? () => send({ t: 'remove', id: p.id }) : undefined,
+  });
   const half = Math.ceil(players.length / 2);
   const top = players.slice(0, half);
   const bottom = players.slice(half);
@@ -324,20 +390,26 @@ export function RoomPage({ roomId }: { roomId: string }) {
           <span>Scrum Poker</span>
         </a>
         <div className="topbar-story">
-          <StoryInput value={room.story} onCommit={(story) => send({ t: 'story', story })} />
+          <StoryInput value={room.story} onCommit={(story) => send({ t: 'story', story })} lockedHint={controlHint(room, you, 'edit the story')} />
           {pinned && (
             <button
               className="btn primary pinned-action"
-              disabled={!room.revealed && votedCount === 0}
+              disabled={!can || (!room.revealed && votedCount === 0)}
               onClick={() => revealOrReset(room.revealed ? 'reset' : 'reveal')}
-              title={room.revealed ? 'Start new round' : 'Reveal cards'}
+              title={(room.revealed ? resetHint : revealHint) ?? (room.revealed ? 'Start new round' : 'Reveal cards')}
             >
               {room.revealed ? 'New round' : 'Reveal'}
             </button>
           )}
         </div>
         <div className="topbar-actions">
-          <TimerControl timer={room.timer} clockOffset={clockOffset} onSet={(seconds) => send({ t: 'timer', seconds })} />
+          <TimerControl
+            timer={room.timer}
+            clockOffset={clockOffset}
+            onSet={(seconds) => send({ t: 'timer', seconds })}
+            lockedHint={controlHint(room, you, 'run the timer')}
+            onTimeUp={onTimeUp}
+          />
           <button className="btn" onClick={copyInvite}>
             Invite
           </button>
@@ -356,7 +428,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
         <StoryLine story={room.story} />
         <ul className="seats" role="list" aria-label="Players">
           {top.map((p) => (
-            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} />
+            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} {...seatProps(p)} />
           ))}
         </ul>
 
@@ -369,11 +441,17 @@ export function RoomPage({ roomId }: { roomId: string }) {
               <button
                 ref={setActionEl}
                 className={`btn primary big ${votedCount > 0 && tally.votedOnline === tally.online ? 'pulse' : ''}`}
-                disabled={votedCount === 0}
+                disabled={!can || votedCount === 0}
+                aria-describedby={revealHint ? 'control-hint' : undefined}
                 onClick={() => revealOrReset('reveal')}
               >
                 Reveal cards
               </button>
+              {revealHint && (
+                <p id="control-hint" className="control-hint">
+                  {revealHint}
+                </p>
+              )}
               {votedCount > 0 && pending > 0 && !me?.spectator && (
                 <button className="link-btn" onClick={() => send({ t: 'nudge' })}>
                   👋 Nudge {pending === 1 ? 'the one who hasn’t' : `the ${pending} who haven’t`} voted
@@ -392,16 +470,27 @@ export function RoomPage({ roomId }: { roomId: string }) {
                     : stats?.mostCommon.join(' / ') || '—'}
                 </span>
               </h2>
-              <button ref={setActionEl} className="btn primary big" onClick={() => revealOrReset('reset')}>
+              <button
+                ref={setActionEl}
+                className="btn primary big"
+                disabled={!can}
+                aria-describedby={resetHint ? 'control-hint' : undefined}
+                onClick={() => revealOrReset('reset')}
+              >
                 Start new round
               </button>
+              {resetHint && (
+                <p id="control-hint" className="control-hint">
+                  {resetHint}
+                </p>
+              )}
             </>
           )}
         </div>
 
         <ul className="seats" role="list" aria-label="More players">
           {bottom.map((p) => (
-            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} tipAbove />
+            <Seat key={p.id} p={p} name={labels.get(p.id) ?? p.name} isMe={p.id === you} revealed={room.revealed} tipAbove {...seatProps(p)} />
           ))}
         </ul>
 
@@ -413,6 +502,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
                 {i > 0 && ', '}
                 <bdi>{labels.get(s.id) ?? s.name}</bdi>
                 {s.id === you ? ' (you)' : ''}
+                {room.locked && s.id === room.facilitatorId ? ' (facilitator)' : ''}
               </span>
             ))}
           </p>
@@ -467,6 +557,19 @@ export function RoomPage({ roomId }: { roomId: string }) {
       </div>
 
       <div className="toasts" role="status" aria-live="polite">
+        {undo && undoOpen && (
+          <div className="toast with-action" key={`undo-${undo.kind}-${undo.until}`}>
+            <span dir="auto">{undoToastText(undo, you)}</span>
+            {can && (
+              <>
+                <span aria-hidden="true"> · </span>
+                <button type="button" className="toast-btn" onClick={() => send({ t: 'undo' })}>
+                  Undo
+                </button>
+              </>
+            )}
+          </div>
+        )}
         {toasts.map((t) => (
           <div key={t.key} className="toast">
             {t.text}
@@ -484,6 +587,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
           }}
           onProfile={updateProfile}
           onDeck={(deckId, custom) => send({ t: 'deck', deckId, custom })}
+          onLock={(on) => send({ t: 'lock', on })}
           onLeave={leaveRoom}
         />
       )}
