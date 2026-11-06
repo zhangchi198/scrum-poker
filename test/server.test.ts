@@ -732,6 +732,13 @@ describe('game state and join flow', () => {
     // Detached: later room messages are refused, and the closing socket does not re-broadcast.
     b.send({ t: 'vote', value: '3' });
     expect(await b.next('error')).toMatchObject({ code: 'not_joined' });
+    const statesSeen = () => b.raw.filter((r) => r.startsWith('{"t":"state"')).length;
+    const before = statesSeen();
+    a.send({ t: 'vote', value: '5' });
+    await a.next('state', (m) => m.room.participants[0]!.voted);
+    b.send({ t: 'ping' });
+    await b.next('pong');
+    expect(statesSeen()).toBe(before); // no longer receives this room's broadcasts
     b.ws.close();
     await closed(b.ws);
     expect(app.rooms.get(roomId)!.participants.size).toBe(1);
