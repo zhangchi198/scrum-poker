@@ -6,10 +6,13 @@ const host = process.env.HOST ?? '0.0.0.0';
 const staticDir = process.env.STATIC_DIR ?? fileURLToPath(new URL('../client/dist', import.meta.url));
 const dataFile = process.env.DATA_FILE || undefined;
 
-const app = createApp({ staticDir, dataFile });
+// The deploy passes the commit SHA as a build arg (Dockerfile -> APP_VERSION); /healthz reports its short form.
+const version = (process.env.APP_VERSION || 'dev').slice(0, 7);
+
+const app = createApp({ staticDir, dataFile, version });
 
 app.server.listen(port, host, () => {
-  console.log(`[poker] listening on http://${host}:${port} (static: ${staticDir}, data: ${dataFile ?? 'memory only'})`);
+  console.log(`[poker] listening on http://${host}:${port} (version ${version}, static: ${staticDir}, data: ${dataFile ?? 'memory only'})`);
 });
 
 // Last resort: never die silently. Save what we can and exit non-zero so Docker restarts us.

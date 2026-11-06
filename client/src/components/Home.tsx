@@ -1,9 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { DECKS, LIMITS, type DeckId } from '../../../shared/protocol.ts';
 import { loadIdentity, saveIdentity } from '../lib/identity.ts';
 import { parseInvite } from '../lib/invite.ts';
 import { markJoined } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
+import { setPageKind } from '../lib/vitals.ts';
 import { parseCustomInput } from './deck.ts';
 import { DeckPreview } from './DeckPreview.tsx';
 import { FeedbackDialog } from './FeedbackDialog.tsx';
@@ -25,6 +26,7 @@ export function Home() {
   const [error, setError] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState('');
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  useEffect(() => setPageKind('home'), []);
 
   async function create(e: FormEvent) {
     e.preventDefault();

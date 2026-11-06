@@ -7,9 +7,52 @@
     <meta name="color-scheme" content="light dark" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <title>Scrum Poker</title>
+    <!-- App shell: painted from this inline CSS before any script or stylesheet arrives (CSP allows inline styles, not
+         inline scripts). It mirrors the home page layout; Preact replaces #root's contents on mount. -->
+    <style>
+      :root { --sh-bg: #f5f6fb; --sh-surface: #fff; --sh-border: #dde1ec; --sh-text: #161a2e; --sh-bar: #e6e9f4; --sh-accent: #4f46e5; --sh-muted: #5b6180; }
+      @media (prefers-color-scheme: dark) {
+        :root { --sh-bg: #0d0f1c; --sh-surface: #161a2d; --sh-border: #2b3152; --sh-text: #eceefb; --sh-bar: #232845; --sh-accent: #8b84ff; --sh-muted: #9ba1c4; }
+      }
+      html, body { margin: 0; background: var(--sh-bg); color: var(--sh-text); }
+      #root { min-height: 100dvh; }
+      .sh { max-width: 560px; margin: 0 auto; padding: 48px 16px 32px; display: grid; gap: 16px; font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+      .sh-hero { text-align: center; margin-bottom: 8px; }
+      .sh-cards { position: relative; height: 84px; margin-bottom: 14px; }
+      .sh-card { position: absolute; left: 50%; top: 6px; width: 50px; height: 70px; margin-left: -25px; border-radius: 9px; background: var(--sh-surface); border: 2px solid var(--sh-accent); }
+      .sh-card:nth-child(1) { transform: translateX(-38px) rotate(-12deg); }
+      .sh-card:nth-child(2) { transform: translateX(38px) rotate(12deg); }
+      .sh-card:nth-child(3) { background: var(--sh-accent); z-index: 1; }
+      .sh-brand { margin: 0 0 12px; font-size: clamp(2rem, 6vw, 2.6rem); font-weight: 800; letter-spacing: -0.02em; line-height: 1.45; }
+      .sh-lede { color: var(--sh-muted); margin: 0 auto; max-width: 42ch; line-height: 1.45; }
+      .sh-bar { height: 14px; border-radius: 7px; background: var(--sh-bar); margin: 0 auto; }
+      .sh-panel { background: var(--sh-surface); border: 1px solid var(--sh-border); border-radius: 14px; padding: 22px; display: grid; gap: 14px; box-shadow: 0 1px 2px rgb(22 26 46 / 6%), 0 4px 14px rgb(22 26 46 / 6%); }
+      .sh-panel .sh-bar { margin: 0; }
+      .sh-field { height: 40px; border-radius: 10px; border: 1px solid var(--sh-border); background: var(--sh-bar); }
+      .sh-btn { height: 46px; border-radius: 10px; background: var(--sh-accent); opacity: 0.85; }
+      @media (prefers-reduced-motion: no-preference) {
+        .sh-bar, .sh-field { animation: sh-pulse 1.6s ease-in-out infinite; }
+        @keyframes sh-pulse { 50% { opacity: 0.55; } }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="sh" aria-busy="true">
+        <div class="sh-hero">
+          <div class="sh-cards" aria-hidden="true"><span class="sh-card"></span><span class="sh-card"></span><span class="sh-card"></span></div>
+          <p class="sh-brand">Scrum Poker</p>
+          <p class="sh-lede">Estimate stories together in real time. Votes stay hidden until everyone reveals, so nobody anchors.</p>
+        </div>
+        <div class="sh-panel" aria-hidden="true">
+          <div class="sh-bar" style="width: 40%"></div>
+          <div class="sh-field"></div>
+          <div class="sh-bar" style="width: 18%"></div>
+          <div class="sh-field" style="height: 96px"></div>
+          <div class="sh-btn"></div>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

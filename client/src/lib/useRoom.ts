@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ClientMsg, ErrorCode, RoomView, ServerMsg } from '../../../shared/protocol.ts';
+import { takeEarlySocket } from './earlySocket.ts';
+import { mark } from './vitals.ts';
 
 /** What the join message carries. Read afresh on every (re)connect so it is never a stale copy. */
 export interface JoinInfo {
@@ -43,22 +45,28 @@ export function useRoom(roomId: string, enabled: boolean, getJoinInfo: () => Joi
     setStatus('connecting');
     let stopped = false;
     let attempt = 0;
+    let first = true;
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     let pingTimer: ReturnType<typeof setInterval> | undefined;
 
     const connect = () => {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const ws = new WebSocket(`${proto}//${location.host}/ws`);
+      // The very first connect adopts the socket main.tsx opened before React rendered, if there is one.
+      const ws = (first && takeEarlySocket(roomId)) || new WebSocket(`${proto}//${location.host}/ws`);
+      first = false;
       wsRef.current = ws;
       let welcomed = false;
 
-      ws.onopen = () => {
+      const onOpen = () => {
+        mark('wsOpen');
         attempt = 0;
         const id = joinInfoRef.current();
         ws.send(JSON.stringify({ t: 'join', roomId, clientId: id.clientId, name: id.name, spectator: id.spectator } satisfies ClientMsg));
         // Keep idle connections from being dropped by proxies (Cloudflare closes after ~100s idle).
         pingTimer = setInterval(() => ws.readyState === WebSocket.OPEN && ws.send('{"t":"ping"}'), 25_000);
       };
+      ws.onopen = onOpen;
+      if (ws.readyState === WebSocket.OPEN) onOpen(); // an early socket may have opened before we got here
 
       ws.onmessage = (ev) => {
         let msg: ServerMsg;
@@ -70,6 +78,7 @@ export function useRoom(roomId: string, enabled: boolean, getJoinInfo: () => Joi
         switch (msg.t) {
           case 'welcome':
             welcomed = true;
+            mark('welcome');
             setYou(msg.you);
             setStatus('open');
             setRoom(msg.room);

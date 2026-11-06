@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { computeStats, type RoomLookup } from '../../../shared/protocol.ts';
 import { IDENTITY_KEY, loadIdentity, saveIdentity } from '../lib/identity.ts';
-import { forgetJoined, hasJoined, markJoined, readSpectator, writeSpectator } from '../lib/joined.ts';
+import { takeInjectedLookup } from '../lib/injected.ts';
+import { forgetJoined, markJoined, readSpectator, resumable, writeSpectator } from '../lib/joined.ts';
 import { navigate } from '../lib/router.ts';
 import { NEW_ROUND_MESSAGE, progressDelay, revealMessage } from '../lib/announce.ts';
 import { watchInteraction, playChime } from '../lib/chime.ts';
@@ -12,6 +13,7 @@ import { displayNames } from '../lib/names.ts';
 import { nudgeTargets, tallyVotes, voteStatus } from '../lib/tally.ts';
 import { createTitleFlasher } from '../lib/title.ts';
 import { useRoom } from '../lib/useRoom.ts';
+import { mark, markInlinedLookup, reportSoon, setPageKind } from '../lib/vitals.ts';
 import { Hand } from './Hand.tsx';
 import { JoinDialog } from './JoinDialog.tsx';
 import { NotFound } from './NotFound.tsx';
@@ -41,11 +43,13 @@ const PROGRESS_GAP = 4000;
 
 export function RoomPage({ roomId }: { roomId: string }) {
   // The join dialog shows on the first visit to a room in this browser (the creator, who typed a name on Home, skips it).
-  const [joined, setJoined] = useState(() => !!loadIdentity().name && hasJoined(roomId));
+  const [joined, setJoined] = useState(() => resumable(roomId));
   // Per tab and room, never stored where a later room could inherit it.
   const spectatorRef = useRef(readSpectator(roomId));
   // What the server says about this room, fetched before asking for a name: undefined = still checking.
-  const [lookup, setLookup] = useState<RoomLookup | 'missing' | null | undefined>(undefined);
+  // An invite link arrives with it already inlined in the HTML, so that round trip is skipped.
+  const inlinedLookup = useRef(takeInjectedLookup(roomId));
+  const [lookup, setLookup] = useState<RoomLookup | 'missing' | null | undefined>(inlinedLookup.current ?? undefined);
   const [floaters, setFloaters] = useState<Floater[]>([]);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [shakeKey, setShakeKey] = useState(0);
@@ -242,7 +246,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
 
   // Before asking for a name, check the room exists (and get context for the dialog).
   useEffect(() => {
-    if (joined) return;
+    if (joined || inlinedLookup.current) return;
     const ctl = new AbortController();
     fetch(`/api/rooms/${roomId}`, { signal: ctl.signal })
       .then(async (res) => {
@@ -255,6 +259,23 @@ export function RoomPage({ roomId }: { roomId: string }) {
       });
     return () => ctl.abort();
   }, [joined, roomId]);
+
+  // Timing milestones for the real-user beacon (see lib/vitals.ts).
+  useEffect(() => {
+    if (lookup === undefined) return;
+    mark('lookup');
+    if (inlinedLookup.current) markInlinedLookup();
+    if (joined) return;
+    setPageKind(lookup === 'missing' ? 'other' : 'join');
+    if (lookup !== 'missing') reportSoon(1500); // the join dialog is the invitee's "interactive"
+  }, [lookup, joined]);
+  const hasRoom = room !== null;
+  useEffect(() => {
+    if (!hasRoom) return;
+    mark('hand');
+    setPageKind('room');
+    reportSoon();
+  }, [hasRoom]);
 
   // Another tab changed the name: pick it up here and tell the room.
   useEffect(() => {

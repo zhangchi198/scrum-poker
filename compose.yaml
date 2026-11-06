@@ -3,7 +3,10 @@
 name: scrum-poker
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        GIT_SHA: ${GIT_SHA:-dev}
     image: scrum-poker:latest
     restart: unless-stopped
     init: true # forwards SIGTERM so rooms get saved before a restart

@@ -1,7 +1,10 @@
+import { useEffect } from 'react';
 import { navigate } from '../lib/router.ts';
+import { setPageKind } from '../lib/vitals.ts';
 
 /** Shown for unknown paths and for rooms that do not exist. */
 export function NotFound({ title = 'Page not found', message, action = 'Back to Scrum Poker' }: { title?: string; message?: string; action?: string }) {
+  useEffect(() => setPageKind('other'), []);
   return (
     <main className="center-page">
       <div className="panel">
