@@ -18,6 +18,9 @@
   --warn: #b45309;
   --shadow: 0 1px 2px rgb(22 26 46 / 6%), 0 4px 14px rgb(22 26 46 / 6%);
   --radius: 14px;
+  --s: 1; /* UI scale, raised on wide screens */
+  --top-h: 60px;
+  --dock-h: 100px;
   color-scheme: light;
 }
 
@@ -49,15 +52,26 @@
   box-sizing: border-box;
 }
 
+html {
+  font-size: calc(16px * var(--s));
+  /* Anything scrolled or focused into view clears the sticky top bar and dock. */
+  scroll-padding-top: var(--top-h);
+  scroll-padding-bottom: var(--dock-h);
+}
 html,
 body {
   margin: 0;
   background: var(--bg);
   color: var(--text);
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  font-size: 16px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+}
+body {
+  font-size: 1rem;
+}
+body:has(dialog[open]) {
+  overflow: hidden;
 }
 
 #root {
@@ -357,6 +371,17 @@ select:focus {
   letter-spacing: -0.02em;
   flex-shrink: 0;
 }
+.topbar-story {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pinned-action {
+  flex-shrink: 0;
+  animation: fade-up 0.2s ease-out;
+}
 .story-input {
   flex: 1;
   min-width: 0;
@@ -383,10 +408,10 @@ select:focus {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
+  gap: calc(18px * var(--s));
   padding: 28px 16px 24px;
   width: 100%;
-  max-width: 980px;
+  max-width: calc(980px * var(--s));
   margin: 0 auto;
   flex: 1;
 }
@@ -394,12 +419,12 @@ select:focus {
   display: flex;
   flex-wrap: wrap;
   justify-content: center;
-  gap: 18px 22px;
+  gap: calc(18px * var(--s)) calc(22px * var(--s));
   min-height: 20px;
 }
 .table {
-  width: min(520px, 100%);
-  min-height: 170px;
+  width: min(calc(520px * var(--s)), 100%);
+  min-height: calc(170px * var(--s));
   border-radius: 999px;
   background: radial-gradient(ellipse at 50% 35%, color-mix(in srgb, var(--table) 70%, var(--surface)), var(--table));
   border: 2px solid var(--table-edge);
@@ -449,7 +474,7 @@ select:focus {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  width: 76px;
+  width: calc(76px * var(--s));
   transition: opacity 0.2s;
 }
 .seat.offline {
@@ -469,8 +494,8 @@ select:focus {
   font-weight: 800;
 }
 .slot {
-  width: 48px;
-  height: 68px;
+  width: calc(48px * var(--s));
+  height: calc(68px * var(--s));
   perspective: 600px;
 }
 .flip {
@@ -533,7 +558,7 @@ select:focus {
 
 /* ---------- stats ---------- */
 .stats {
-  width: min(520px, 100%);
+  width: min(calc(520px * var(--s)), 100%);
   padding: 18px 20px;
   animation: fade-up 0.3s ease-out;
 }
@@ -609,13 +634,21 @@ select:focus {
 .dock {
   position: sticky;
   bottom: 0;
-  background: color-mix(in srgb, var(--surface) 92%, transparent);
-  backdrop-filter: blur(8px);
+  z-index: 5;
+  /* Opaque: a translucent dock let the stats panel show through (worst in WebKit). */
+  background: var(--surface);
   border-top: 1px solid var(--border);
-  padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  box-shadow: 0 -6px 16px -10px rgb(22 26 46 / 25%);
+  padding: 8px 16px calc(10px + env(safe-area-inset-bottom));
   display: grid;
-  gap: 10px;
+  gap: 6px;
   justify-items: center;
+}
+.dock-main {
+  display: flex;
+  justify-content: center;
+  max-width: 100%;
+  min-width: 0;
 }
 .hand {
   display: flex;
@@ -623,13 +656,28 @@ select:focus {
   overflow-x: auto;
   max-width: 100%;
   padding: 10px 4px 4px;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+  /* Edge fades (set from Hand.tsx) hint that the hand scrolls sideways. */
+  --fade-l: 0px;
+  --fade-r: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent 0, #000 var(--fade-l), #000 calc(100% - var(--fade-r)), transparent 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 var(--fade-l), #000 calc(100% - var(--fade-r)), transparent 100%);
+}
+.hand::-webkit-scrollbar {
+  display: none;
+}
+.card-btn:first-child {
+  margin-left: auto;
+}
+.card-btn:last-child {
+  margin-right: auto;
 }
 .card-btn {
   appearance: none;
   flex: 0 0 auto;
-  width: 50px;
-  height: 72px;
+  width: calc(50px * var(--s));
+  height: calc(72px * var(--s));
   border-radius: 10px;
   border: 2px solid var(--accent);
   background: var(--card-face);
@@ -674,6 +722,50 @@ select:focus {
 .dock-note {
   color: var(--muted);
   padding: 8px 0;
+}
+.vote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 16px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-weight: 600;
+  color: var(--muted);
+}
+.chip-card {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  line-height: 1;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 2px solid var(--accent);
+  background: var(--card-face);
+  color: var(--accent);
+  font-weight: 800;
+}
+.reactions-wrap {
+  position: relative;
+}
+.reactions-toggle {
+  display: none;
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 12px;
+  font-size: 1.4rem;
+  line-height: 1;
+  width: 44px;
+  height: 44px;
+  cursor: pointer;
+}
+.reactions-toggle[aria-expanded='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
 }
 .reactions {
   display: flex;
@@ -780,7 +872,7 @@ select:focus {
 }
 .floater {
   position: absolute;
-  bottom: 90px;
+  bottom: var(--dock-h);
   display: grid;
   justify-items: center;
   animation: float-up 2.8s ease-out forwards;
@@ -812,7 +904,7 @@ select:focus {
 }
 .toasts {
   position: fixed;
-  top: 70px;
+  bottom: calc(var(--dock-h) + 12px);
   left: 50%;
   transform: translateX(-50%);
   display: grid;
@@ -843,35 +935,205 @@ select:focus {
 .modal {
   width: min(440px, 100%);
 }
+.settings-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 0;
+  margin: auto;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.settings-dialog::backdrop {
+  background: rgb(8 10 20 / 50%);
+}
+.modal-body {
+  padding: 22px;
+}
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 8px;
+}
+.dialog-actions .row {
+  flex-wrap: wrap;
+  margin-left: auto;
+}
 
-/* ---------- small screens ---------- */
-@media (max-width: 720px) {
+/* ---------- touch-sized layouts: >= 44px targets ---------- */
+@media (max-width: 720px), (max-height: 500px), (pointer: coarse) {
+  .btn,
+  .link-btn,
+  .menu button {
+    min-height: 44px;
+  }
+  .btn.icon {
+    min-width: 44px;
+  }
+  .link-btn {
+    min-width: 44px;
+    padding: 4px 10px;
+  }
+  .reaction-btn {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .timer-stop {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .timer.running {
+    padding: 0 0 0 12px;
+  }
+  .timer.running,
+  .story-input {
+    min-height: 44px;
+  }
+  .check input {
+    width: 22px;
+    height: 22px;
+  }
+  .check {
+    min-height: 44px;
+  }
+}
+
+/* ---------- phones: portrait (<= 720px wide) or landscape (<= 500px tall) ---------- */
+@media (max-width: 720px), (max-height: 500px) {
   .topbar {
-    flex-wrap: wrap;
+    padding: 6px 12px;
     gap: 8px;
   }
   .brand span {
     display: none;
   }
-  .story-input {
-    order: 3;
-    flex-basis: 100%;
-  }
   .topbar-actions {
     margin-left: auto;
   }
+  .table-area {
+    padding: 16px 12px 20px;
+    gap: 14px;
+  }
   .table {
     border-radius: 28px;
-    min-height: 140px;
-    padding: 18px;
+    min-height: 130px;
+    padding: 16px;
   }
   .seat {
     width: 64px;
   }
   .card-btn {
-    width: 44px;
-    height: 64px;
-    font-size: 1.05rem;
+    min-width: 44px;
+  }
+  /* One-row dock: hand scrolls sideways, reactions live behind a single button. */
+  .dock {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px calc(6px + env(safe-area-inset-bottom));
+  }
+  .dock-main {
+    flex: 1;
+    justify-content: center;
+    min-width: 0;
+  }
+  .hand {
+    padding: 10px 2px 2px;
+  }
+  .vote-chip,
+  .dock-note {
+    min-height: 44px;
+  }
+  .reactions-toggle {
+    display: block;
+    flex: none;
+  }
+  .reactions {
+    display: none;
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 10px);
+    z-index: 6;
+    flex-wrap: wrap;
+    width: max-content;
+    max-width: calc(100vw - 24px);
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    box-shadow: var(--shadow);
+  }
+  .reactions.open {
+    display: flex;
+  }
+  .settings-dialog {
+    width: min(440px, calc(100vw - 24px));
+  }
+}
+@media (max-width: 720px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+  .topbar-story {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .modal-body {
+    padding: 18px;
+  }
+}
+@media (max-width: 420px) {
+  .reactions {
+    display: none;
+    width: auto;
+  }
+  .reactions.open {
+    display: grid;
+    grid-template-columns: repeat(4, 44px);
+  }
+}
+@media (max-height: 500px) {
+  .topbar-story {
+    order: 0;
+  }
+  .table-area {
+    padding-top: 10px;
+    gap: 10px;
+  }
+  .table {
+    min-height: 110px;
+    padding: 10px 20px;
+    gap: 6px;
+  }
+  .slot {
+    width: 40px;
+    height: 56px;
+  }
+  .card-btn {
+    height: 60px;
+  }
+}
+
+/* ---------- wide screens: scale the whole UI up ---------- */
+@media (min-width: 1400px) {
+  :root {
+    --s: 1.2;
+  }
+}
+@media (min-width: 1800px) {
+  :root {
+    --s: 1.4;
+  }
+}
+@media (min-width: 2400px) {
+  :root {
+    --s: 1.8;
   }
 }
 

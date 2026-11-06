@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { computeStats, REACTIONS } from '../../../shared/protocol.ts';
+import { computeStats } from '../../../shared/protocol.ts';
 import { loadIdentity, saveIdentity, type Identity } from '../lib/identity.ts';
 import { navigate } from '../lib/router.ts';
 import { useRoom } from '../lib/useRoom.ts';
+import { Hand } from './Hand.tsx';
 import { JoinDialog } from './JoinDialog.tsx';
+import { Reactions } from './Reactions.tsx';
 import { Seat } from './Seat.tsx';
 import { SettingsDialog } from './SettingsDialog.tsx';
 import { StatsPanel, formatNumber } from './StatsPanel.tsx';
@@ -32,6 +34,12 @@ export function RoomPage({ roomId }: { roomId: string }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [shakeKey, setShakeKey] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsBtn = useRef<HTMLButtonElement>(null);
+  const [topEl, setTopEl] = useState<HTMLElement | null>(null);
+  const [dockEl, setDockEl] = useState<HTMLElement | null>(null);
+  const [actionEl, setActionEl] = useState<HTMLElement | null>(null);
+  const [bars, setBars] = useState({ top: 0, dock: 0 });
+  const [pinned, setPinned] = useState(false);
 
   const toast = useCallback((text: string) => {
     const key = ++seq;
@@ -79,6 +87,39 @@ export function RoomPage({ roomId }: { roomId: string }) {
       for (let i = 0; i < 10; i++) setTimeout(() => float('🎉', ''), i * 90);
     }
   }, [room, stats, float]);
+
+  // Publish the sticky bars' heights (CSS uses them for scroll padding and toast position).
+  useEffect(() => {
+    if (!topEl || !dockEl) return;
+    const apply = () => {
+      const top = topEl.offsetHeight;
+      const dock = dockEl.offsetHeight;
+      const root = document.documentElement.style;
+      root.setProperty('--top-h', `${top}px`);
+      root.setProperty('--dock-h', `${dock}px`);
+      setBars((b) => (b.top === top && b.dock === dock ? b : { top, dock }));
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(topEl);
+    ro.observe(dockEl);
+    return () => ro.disconnect();
+  }, [topEl, dockEl]);
+
+  // Pin a compact copy of the table's main action to the top bar once the real one scrolls out of view.
+  useEffect(() => {
+    if (!actionEl) {
+      setPinned(false);
+      return;
+    }
+    // "Out of view" means mostly hidden, so a button peeking out from under the bars still gets pinned.
+    const io = new IntersectionObserver(([entry]) => setPinned(!!entry && (!entry.isIntersecting || entry.intersectionRatio < 0.6)), {
+      rootMargin: `-${bars.top}px 0px -${bars.dock}px 0px`,
+      threshold: [0, 0.6],
+    });
+    io.observe(actionEl);
+    return () => io.disconnect();
+  }, [actionEl, bars]);
 
   useEffect(() => {
     document.title = room?.story ? `${room.story} · Scrum Poker` : 'Scrum Poker';
@@ -138,7 +179,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
 
   return (
     <div className="room">
-      <header className="topbar">
+      <header className="topbar" ref={setTopEl}>
         <a
           className="brand"
           href="/"
@@ -151,13 +192,25 @@ export function RoomPage({ roomId }: { roomId: string }) {
           <img src="/favicon.svg" alt="" width={28} height={28} />
           <span>Scrum Poker</span>
         </a>
-        <StoryInput value={room.story} onCommit={(story) => send({ t: 'story', story })} />
+        <div className="topbar-story">
+          <StoryInput value={room.story} onCommit={(story) => send({ t: 'story', story })} />
+          {pinned && (
+            <button
+              className="btn primary pinned-action"
+              disabled={!room.revealed && votedCount === 0}
+              onClick={() => send({ t: room.revealed ? 'reset' : 'reveal' })}
+              title={room.revealed ? 'Start new round' : 'Reveal cards'}
+            >
+              {room.revealed ? 'New round' : 'Reveal'}
+            </button>
+          )}
+        </div>
         <div className="topbar-actions">
           <TimerControl timer={room.timer} clockOffset={clockOffset} onSet={(seconds) => send({ t: 'timer', seconds })} />
           <button className="btn" onClick={copyInvite}>
             Invite
           </button>
-          <button className="btn icon" onClick={() => setSettingsOpen(true)} aria-label="Room settings" title="Settings">
+          <button ref={settingsBtn} className="btn icon" onClick={() => setSettingsOpen(true)} aria-label="Room settings" title="Settings">
             ⚙︎
           </button>
         </div>
@@ -183,6 +236,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
                     : `${votedCount} of ${players.length} voted`}
               </p>
               <button
+                ref={setActionEl}
                 className={`btn primary big ${votedCount > 0 && pending === 0 ? 'pulse' : ''}`}
                 disabled={votedCount === 0}
                 onClick={() => send({ t: 'reveal' })}
@@ -205,7 +259,7 @@ export function RoomPage({ roomId }: { roomId: string }) {
                   ? formatNumber(stats.average)
                   : stats?.mostCommon.join(' / ') || '—'}
               </p>
-              <button className="btn primary big" onClick={() => send({ t: 'reset' })}>
+              <button ref={setActionEl} className="btn primary big" onClick={() => send({ t: 'reset' })}>
                 Start new round
               </button>
             </>
@@ -227,39 +281,30 @@ export function RoomPage({ roomId }: { roomId: string }) {
         {stats && stats.total > 0 && <StatsPanel stats={stats} />}
       </main>
 
-      <footer className="dock">
-        {me?.spectator ? (
-          <div className="dock-note">
-            You’re watching.{' '}
-            <button className="link-btn" onClick={() => updateProfile({ spectator: false })}>
-              Join as a voter
-            </button>
-          </div>
-        ) : (
-          <div key={shakeKey} className={`hand ${shakeKey ? 'shake' : ''} ${canVote ? '' : 'locked'}`} role="group" aria-label="Your cards">
-            {room.cards.map((card) => {
-              const selected = me?.vote === card;
-              return (
-                <button
-                  key={card}
-                  className={`card-btn ${selected ? 'selected' : ''}`}
-                  disabled={!canVote}
-                  aria-pressed={selected}
-                  onClick={() => send({ t: 'vote', value: selected ? null : card })}
-                >
-                  {card}
-                </button>
-              );
-            })}
-          </div>
-        )}
-        <div className="reactions" role="group" aria-label="Reactions">
-          {REACTIONS.map((emoji) => (
-            <button key={emoji} className="reaction-btn" onClick={() => send({ t: 'react', emoji })} aria-label={`React ${emoji}`}>
-              {emoji}
-            </button>
-          ))}
+      <footer className="dock" ref={setDockEl}>
+        <div className="dock-main">
+          {me?.spectator ? (
+            <div className="dock-note">
+              You’re watching.{' '}
+              <button className="link-btn" onClick={() => updateProfile({ spectator: false })}>
+                Join as a voter
+              </button>
+            </div>
+          ) : room.revealed ? (
+            <div className="vote-chip">
+              {me?.vote ? (
+                <>
+                  Your vote: <span className="chip-card">{me.vote}</span>
+                </>
+              ) : (
+                'You didn’t vote'
+              )}
+            </div>
+          ) : (
+            <Hand key={shakeKey} cards={room.cards} vote={me?.vote} canVote={!!canVote} shakeKey={shakeKey} onVote={(value) => send({ t: 'vote', value })} />
+          )}
         </div>
+        <Reactions onReact={(emoji) => send({ t: 'react', emoji })} />
       </footer>
 
       <div className="floaters" aria-hidden>
@@ -283,7 +328,10 @@ export function RoomPage({ roomId }: { roomId: string }) {
         <SettingsDialog
           room={room}
           me={me}
-          onClose={() => setSettingsOpen(false)}
+          onClose={() => {
+            setSettingsOpen(false);
+            settingsBtn.current?.focus();
+          }}
           onProfile={updateProfile}
           onDeck={(deckId, custom) => send({ t: 'deck', deckId, custom })}
         />
