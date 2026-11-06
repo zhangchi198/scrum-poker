@@ -572,8 +572,12 @@ describe('http hardening', () => {
       });
       let buf = '';
       sock.on('data', (d) => (buf += d.toString()));
-      sock.on('close', () => ok(buf.split('\r\n')[0] ?? ''));
-      sock.on('error', () => ok('socket error'));
+      // The server answers 413 and closes while we may still be uploading the rest of the body, so the client can
+      // see ECONNRESET after the response already arrived (normal TCP behaviour; real clients read the response).
+      // Judge by what was received, and only call it a socket error when nothing came back at all.
+      const settle = () => ok(buf.split('\r\n')[0] || 'socket error');
+      sock.on('close', settle);
+      sock.on('error', settle);
     });
     expect(status).toBe('HTTP/1.1 413 Payload Too Large');
     expect((await fetch(`${base}/healthz`)).status).toBe(200);

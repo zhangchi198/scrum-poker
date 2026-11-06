@@ -1,0 +1,26 @@
+# Dependency update PRs. CI runs on each; see README "Dependency updates".
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Toronto
+    open-pull-requests-limit: 5
+    groups:
+      # One PR per week for routine bumps instead of a PR per package.
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: America/Toronto
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
