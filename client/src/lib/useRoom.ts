@@ -13,6 +13,7 @@ export type ConnStatus = 'connecting' | 'open' | 'reconnecting';
 export interface RoomEvents {
   onReaction?: (r: { from: string; name: string; emoji: string }) => void;
   onNudge?: (fromName: string) => void;
+  onNotice?: (n: Extract<ServerMsg, { t: 'notice' }>) => void;
   onError?: (code: ErrorCode, message: string) => void;
 }
 
@@ -83,6 +84,9 @@ export function useRoom(roomId: string, enabled: boolean, getJoinInfo: () => Joi
             break;
           case 'nudge':
             eventsRef.current.onNudge?.(msg.fromName);
+            break;
+          case 'notice':
+            eventsRef.current.onNotice?.(msg);
             break;
           case 'error':
             if (msg.code === 'room_not_found' || msg.code === 'room_full') {

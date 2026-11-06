@@ -30,6 +30,8 @@ export interface ParticipantView {
   spectator: boolean;
   connected: boolean;
   voted: boolean;
+  /** When this person went offline (server clock, rounded down to the second); null while connected. */
+  offlineSince: number | null;
   /** Only present for yourself, or for everyone once the round is revealed. */
   vote: string | null;
 }
@@ -38,6 +40,19 @@ export interface TimerView {
   endsAt: number;
   duration: number;
 }
+
+/** What "Undo" would restore right now. Carries no votes. Present for 10 seconds after a new round or a deck change. */
+export interface UndoView {
+  kind: 'reset' | 'deck';
+  /** Server clock time at which the window closes. */
+  until: number;
+  byId: string;
+  byName: string;
+  /** For a deck change: the new deck's label. */
+  deckLabel?: string;
+}
+
+export const UNDO_WINDOW_MS = 10_000;
 
 export interface RoomView {
   id: string;
@@ -48,6 +63,10 @@ export interface RoomView {
   round: number;
   participants: ParticipantView[];
   timer: TimerView | null;
+  /** Public id of the facilitator while the facilitator lock is on, otherwise null. */
+  facilitatorId: string | null;
+  locked: boolean;
+  undo: UndoView | null;
   /** Server clock at send time, so clients can correct the timer for clock skew. */
   now: number;
 }
@@ -63,6 +82,10 @@ export type ClientMsg =
   | { t: 'timer'; seconds: number | null }
   | { t: 'react'; emoji: string }
   | { t: 'nudge' }
+  | { t: 'undo' }
+  | { t: 'lock'; on: boolean }
+  | { t: 'facilitator'; id: string }
+  | { t: 'remove'; id: string }
   | { t: 'leave' }
   | { t: 'ping' };
 
@@ -71,13 +94,16 @@ export type RoomLookup =
   | { status: 'live'; story: string; players: number; deckLabel: string }
   | { status: 'revivable'; deckLabel: string };
 
-export type ErrorCode = 'room_not_found' | 'room_full' | 'bad_request' | 'rate_limited' | 'not_joined';
+export type ErrorCode = 'room_not_found' | 'room_full' | 'bad_request' | 'rate_limited' | 'not_joined' | 'forbidden';
 
 export type ServerMsg =
   | { t: 'welcome'; you: string; room: RoomView }
   | { t: 'state'; room: RoomView }
   | { t: 'reaction'; from: string; name: string; emoji: string }
   | { t: 'nudge'; fromName: string }
+  | { t: 'notice'; kind: 'undone'; what: 'reset' | 'deck'; byId: string; byName: string }
+  | { t: 'notice'; kind: 'removed'; byId: string; byName: string; name: string }
+  | { t: 'notice'; kind: 'facilitator_left' }
   | { t: 'error'; code: ErrorCode; message: string }
   | { t: 'pong' };
 

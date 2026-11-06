@@ -3,6 +3,7 @@ import { DECK_IDS, DECKS, LIMITS, type DeckId, type ParticipantView, type RoomVi
 import { validateCustomInput } from './deck.ts';
 import { DeckPreview } from './DeckPreview.tsx';
 import { FeedbackDialog } from './FeedbackDialog.tsx';
+import { canControl, facilitatorName } from '../lib/permissions.ts';
 
 const deckLabel = (id: DeckId) => (id === 'custom' ? 'Custom' : DECKS[id].label);
 
@@ -16,6 +17,7 @@ export function SettingsDialog({
   onClose,
   onProfile,
   onDeck,
+  onLock,
   onLeave,
 }: {
   room: RoomView;
@@ -23,6 +25,7 @@ export function SettingsDialog({
   onClose: () => void;
   onProfile: (patch: { name?: string; spectator?: boolean }) => void;
   onDeck: (deckId: DeckId, custom?: string[]) => void;
+  onLock: (on: boolean) => void;
   onLeave: () => void;
 }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -35,6 +38,10 @@ export function SettingsDialog({
   const [spectator, setSpectator] = useState(me.spectator);
   const [deckId, setDeckId] = useState<DeckId>(room.deckId);
   const [custom, setCustom] = useState(room.deckId === 'custom' ? room.cards.join(', ') : '1, 2, 3, 5, 8, ?');
+  const iAmFacilitator = room.locked && room.facilitatorId === me.id;
+  const [lock, setLock] = useState(iAmFacilitator);
+  const allowed = canControl(room, me.id);
+  const lockedBy = facilitatorName(room);
   const [submitted, setSubmitted] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
 
@@ -60,7 +67,8 @@ export function SettingsDialog({
     if (name.trim() && name.trim() !== me.name) patch.name = name.trim();
     if (spectator !== me.spectator) patch.spectator = spectator;
     if (Object.keys(patch).length) onProfile(patch);
-    if (deckChanged) onDeck(deckId, validation ? validation.cards : undefined);
+    if (lock !== iAmFacilitator && (iAmFacilitator || !room.locked)) onLock(lock);
+    if (deckChanged && allowed) onDeck(deckId, validation ? validation.cards : undefined);
     dialogRef.current?.close();
   }
 
@@ -90,7 +98,7 @@ export function SettingsDialog({
 
         <label className="field">
           <span>Deck for this room</span>
-          <select value={deckId} onChange={(e) => setDeckId(e.target.value as DeckId)}>
+          <select value={deckId} disabled={!allowed} onChange={(e) => setDeckId(e.target.value as DeckId)}>
             {DECK_IDS.map((id) => (
               <option key={id} value={id}>
                 {deckLabel(id)}
@@ -98,6 +106,7 @@ export function SettingsDialog({
             ))}
           </select>
         </label>
+        {!allowed && <p className="muted small">Only {lockedBy ?? 'the facilitator'} can change the deck.</p>}
         {deckId === 'custom' && (
           <div className="field">
             <label htmlFor="custom-cards">
@@ -105,6 +114,7 @@ export function SettingsDialog({
             </label>
             <input
               id="custom-cards"
+              disabled={!allowed}
               ref={customRef}
               value={custom}
               onChange={(e) => setCustom(e.target.value)}
@@ -119,7 +129,21 @@ export function SettingsDialog({
             )}
           </div>
         )}
-        {deckChanged && <p className="muted small">Changing the deck clears everyone’s votes for this round.</p>}
+        {deckChanged && allowed && <p className="muted small">Changing the deck clears everyone’s votes for this round.</p>}
+
+        <fieldset className="facilitator-box">
+          <legend>Facilitator controls</legend>
+          <label className="check">
+            <input
+              type="checkbox"
+              checked={room.locked && !iAmFacilitator ? true : lock}
+              disabled={room.locked && !iAmFacilitator}
+              onChange={(e) => setLock(e.target.checked)}
+            />
+            <span>Only I can reveal, start new rounds, change the deck, edit the story and run the timer</span>
+          </label>
+          {room.locked && !iAmFacilitator && <p className="muted small">{lockedBy ?? 'The facilitator'} is the facilitator and can turn this off.</p>}
+        </fieldset>
 
         <div className="dialog-actions">
           <button type="button" className="btn danger-text" onClick={onLeave}>

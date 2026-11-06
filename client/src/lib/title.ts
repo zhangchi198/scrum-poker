@@ -7,15 +7,19 @@ export function createTitleFlasher(doc: { title: string }, ms = 6000) {
   let flash = '';
   let timer: ReturnType<typeof setTimeout> | undefined;
   return {
-    flash(text: string) {
+    /** Flashes `text` in the title for `ms` (the default, or until `clear()` when Infinity). */
+    flash(text: string, forMs = ms) {
       if (base === null) base = doc.title;
       flash = text;
       doc.title = `${text} — ${base}`;
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        doc.title = base ?? doc.title;
-        base = null;
-      }, ms);
+      if (forMs !== Infinity) timer = setTimeout(() => this.clear(), forMs);
+    },
+    /** Restores the title now. Safe to call when nothing is flashing. */
+    clear() {
+      clearTimeout(timer);
+      if (base !== null) doc.title = base;
+      base = null;
     },
     setBase(title: string) {
       if (base === null) doc.title = title;

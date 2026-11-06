@@ -3,7 +3,7 @@ import { LIMITS } from '../../../shared/protocol.ts';
 import { blurResult, draftForRemote } from '../lib/story.ts';
 
 /** Shared story title. Your own edits win while you are typing; otherwise the room's latest story shows. */
-export function StoryInput({ value, onCommit }: { value: string; onCommit: (v: string) => void }) {
+export function StoryInput({ value, onCommit, lockedHint }: { value: string; onCommit: (v: string) => void; lockedHint?: string | null }) {
   const [draft, setDraft] = useState(value);
   const focused = useRef(false);
   const edited = useRef(false); // typed since focusing
@@ -26,6 +26,8 @@ export function StoryInput({ value, onCommit }: { value: string; onCommit: (v: s
       dir="auto"
       value={draft}
       maxLength={LIMITS.storyLength}
+      readOnly={!!lockedHint}
+      title={lockedHint ?? undefined}
       placeholder="What are we estimating?"
       aria-label="Story being estimated"
       onFocus={() => {
