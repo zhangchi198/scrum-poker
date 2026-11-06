@@ -1,0 +1,64 @@
+name: CI
+
+# Nothing here runs on our hardware. When the checks pass on a push to main, the `promote` job
+# fast-forwards the `prod` branch to that commit; the poker LXC polls `prod` and deploys it
+# (deploy/poker-deploy.sh). There is no self-hosted runner, so a pull request (from a fork or not)
+# can never execute code on the box, and only a green main commit can reach prod.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Typecheck, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - name: Docker image builds
+        run: docker build -t scrum-poker:ci .
+
+  promote:
+    name: Promote to prod branch
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: promote-prod
+      cancel-in-progress: false
+    steps:
+      # Fast-forward only (force=false): if a newer commit was promoted first, this older one is
+      # refused instead of rolling prod back.
+      - name: Fast-forward prod
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          if out="$(gh api -X PATCH "repos/$REPO/git/refs/heads/prod" -f sha="$SHA" -F force=false 2>&1)"; then
+            echo "prod -> $SHA"
+          elif grep -q 'Reference does not exist' <<<"$out"; then
+            gh api -X POST "repos/$REPO/git/refs" -f ref=refs/heads/prod -f sha="$SHA" >/dev/null
+            echo "created prod at $SHA"
+          elif grep -q 'not a fast forward' <<<"$out"; then
+            echo "::notice::prod is already ahead of $SHA; leaving it"
+          else
+            echo "$out"; exit 1
+          fi

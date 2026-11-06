@@ -1,0 +1,9 @@
+[Unit]
+Description=Weekly scrum-poker rebuild with a fresh base image
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/poker-deploy --rebuild
+TimeoutStartSec=15min

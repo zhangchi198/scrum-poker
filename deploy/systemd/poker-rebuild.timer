@@ -1,0 +1,10 @@
+[Unit]
+Description=Rebuild scrum-poker weekly so base-image OS and Node patches reach prod
+
+[Timer]
+# Sunday 08:00 UTC (03:00/04:00 Toronto), when nobody is estimating.
+OnCalendar=Sun *-*-* 08:00:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target
