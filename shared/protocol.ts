@@ -3,7 +3,7 @@
 
 export const DECKS = {
   fibonacci: { label: 'Fibonacci', cards: ['0', '1', '2', '3', '5', '8', '?', '☕'] },
-  modified: { label: 'Modified Fibonacci', cards: ['0', '1', '2', '3', '5', '8', '?', '☕'] },
+  modified: { label: 'Modified Fibonacci', cards: ['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '?', '☕'] },
   tshirt: { label: 'T-shirt sizes', cards: ['XS', 'S', 'M', 'L', 'XL', 'XXL', '?', '☕'] },
   powers: { label: 'Powers of 2', cards: ['0', '1', '2', '4', '8', '16', '32', '64', '?', '☕'] },
 } as const;

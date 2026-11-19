@@ -475,8 +475,8 @@ describe('room lifetime', () => {
     await a.next('state', (m) => m.room.participants[0]!.vote === '100');
 
     a.send({ t: 'deck', deckId: 'modified' });
-    const after = await a.next('state', (m) => m.room.cards.length === 8);
-    expect(after.room.cards).toEqual(['0', '1', '2', '3', '5', '8', '?', '☕']);
+    const after = await a.next('state', (m) => !m.room.cards.includes('100'));
+    expect(after.room.cards).toEqual(['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '?', '☕']);
     expect(after.room.participants[0]!.vote).toBeNull();
   });
 });
