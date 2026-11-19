@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DECKS, computeStats } from '../shared/protocol.ts';
 import { Room, RoomError, cleanText, isTombstone, randomId } from '../server/room.ts';
 
 const A = 'client-a-000000000000';
@@ -204,6 +205,49 @@ describe('Room', () => {
     expect(isTombstone({ id: 'x', deckId: 'fibonacci', cards: ['1', '2'], lastActivity: NaN })).toBe(false);
     expect(() => Room.restore({ id: 5 } as never)).toThrow('malformed');
     expect(() => Room.restore(null as never)).toThrow('malformed');
+  });
+
+  describe('rooms saved before the Fibonacci decks were cut to 0–8', () => {
+    const OLD_FIB = ['0', '1', '2', '3', '5', '8', '13', '21', '34', '55', '89', '?', '☕'];
+    const OLD_MODIFIED = ['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
+
+    it('keep their saved cards and votes, and keep working', () => {
+      const r = room3();
+      r.setDeck('modified', undefined, 0);
+      r.cards = [...OLD_MODIFIED];
+      r.vote(A, '13', 1);
+      r.vote(B, '40', 1);
+      const restored = Room.restore(JSON.parse(JSON.stringify(r.snapshot())), 5000);
+      expect(restored.deckId).toBe('modified');
+      expect(restored.cards).toEqual(OLD_MODIFIED);
+      expect(restored.participants.get(A)!.vote).toBe('13');
+      restored.join(B, 'Bob', false, 5001);
+      expect(restored.vote(B, '20', 5002)).toBe(true); // old cards are still votable in that room
+      restored.reveal(5003);
+      const votes = restored.view(A).participants.map((p) => p.vote).filter((v): v is string => v !== null);
+      expect(computeStats(votes, restored.cards)).toMatchObject({ total: 2, average: 16.5 });
+    });
+
+    it('move to the current cards when someone picks the deck again, which clears the round as any deck change does', () => {
+      const r = room3();
+      r.cards = [...OLD_FIB];
+      r.vote(A, '89', 1);
+      const restored = Room.restore(JSON.parse(JSON.stringify(r.snapshot())), 5000);
+      restored.join(A, 'Alice', false, 5001);
+      restored.setDeck('fibonacci', undefined, 5002, A);
+      expect(restored.cards).toEqual(DECKS.fibonacci.cards);
+      expect(restored.participants.get(A)!.vote).toBeNull();
+      expect(() => restored.vote(A, '13', 5003)).toThrow(RoomError);
+      restored.undo(5004); // and Undo brings the saved deck and vote back
+      expect(restored.cards).toEqual(OLD_FIB);
+      expect(restored.participants.get(A)!.vote).toBe('89');
+    });
+
+    it('keep their saved cards when a tombstone is revived', () => {
+      const t = { id: 'Room123456', deckId: 'fibonacci', cards: OLD_FIB, lastActivity: 1 };
+      expect(isTombstone(t)).toBe(true);
+      expect(Room.revive(t as never, 5000).cards).toEqual(OLD_FIB);
+    });
   });
 });
 

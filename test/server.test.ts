@@ -186,8 +186,8 @@ describe('server', () => {
     a.send({ t: 'join', roomId, clientId: ID_A, name: 'Alice', spectator: false });
     await a.next('welcome');
     a.send({ t: 'story', story: 'Checkout flow' });
-    a.send({ t: 'vote', value: '13' });
-    await a.next('state', (m) => m.room.participants[0]!.vote === '13' && m.room.story === 'Checkout flow');
+    a.send({ t: 'vote', value: '8' });
+    await a.next('state', (m) => m.room.participants[0]!.vote === '8' && m.room.story === 'Checkout flow');
     await first.app.close();
     apps.splice(apps.indexOf(first.app), 1);
 
@@ -196,7 +196,7 @@ describe('server', () => {
     again.send({ t: 'join', roomId, clientId: ID_A, name: 'Alice', spectator: false });
     const w = await again.next('welcome');
     expect(w.room.story).toBe('Checkout flow');
-    expect(w.room.participants[0]!.vote).toBe('13');
+    expect(w.room.participants[0]!.vote).toBe('8');
   });
 
   it('serves the SPA shell for room URLs and blocks path traversal', async () => {
@@ -451,6 +451,34 @@ describe('room lifetime', () => {
     const again = await joinRoom(third.ws, 'Legacy123a');
     expect((await again.next('welcome')).room.participants[0]!.vote).toBe('5');
   });
+
+  it('loads a room saved with the old, longer Modified Fibonacci deck and its votes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'poker-'));
+    const dataFile = join(dir, 'rooms.json');
+    const oldCards = ['0', '½', '1', '2', '3', '5', '8', '13', '20', '40', '100', '?', '☕'];
+    const r = new Room('BigDeck123', Date.now());
+    r.setDeck('modified', undefined, Date.now());
+    r.cards = [...oldCards];
+    r.join(ID_A, 'Alice', false, Date.now());
+    r.vote(ID_A, '40', Date.now());
+    r.leave(ID_A, Date.now());
+    writeFileSync(dataFile, JSON.stringify({ version: 2, rooms: [r.snapshot()], tombstones: [] }));
+
+    const logs: string[] = [];
+    const { ws } = await start({ dataFile, log: (m: string) => logs.push(m) });
+    expect(logs.join('\n')).not.toContain('ERROR');
+    const a = await joinRoom(ws, 'BigDeck123', ID_A, 'Alice');
+    const w = await a.next('welcome');
+    expect(w.room.cards).toEqual(oldCards);
+    expect(w.room.participants[0]!.vote).toBe('40');
+    a.send({ t: 'vote', value: '100' });
+    await a.next('state', (m) => m.room.participants[0]!.vote === '100');
+
+    a.send({ t: 'deck', deckId: 'modified' });
+    const after = await a.next('state', (m) => m.room.cards.length === 8);
+    expect(after.room.cards).toEqual(['0', '1', '2', '3', '5', '8', '?', '☕']);
+    expect(after.room.participants[0]!.vote).toBeNull();
+  });
 });
 
 describe('persistence robustness', () => {
@@ -678,19 +706,19 @@ describe('socket hardening', () => {
     const c = await client(ws);
     c.send({ t: 'join', roomId, clientId: ID_C, name: 'Spec', spectator: true });
     await c.next('welcome');
-    a.send({ t: 'vote', value: '34' });
-    b.send({ t: 'vote', value: '89' });
+    a.send({ t: 'vote', value: '3' });
+    b.send({ t: 'vote', value: '5' });
     await until(() => [...app.rooms.get(roomId)!.participants.values()].filter((p) => p.vote).length === 2);
     for (const x of [a, b, c]) {
       x.send({ t: 'ping' });
       await x.next('pong'); // every state frame sent before this has arrived
     }
     const all = (x: typeof a) => x.raw.join('\n');
-    expect(all(a)).toContain('"vote":"34"');
-    expect(all(a)).not.toContain('"vote":"89"');
-    expect(all(b)).toContain('"vote":"89"');
-    expect(all(b)).not.toContain('"vote":"34"');
-    expect(all(c)).not.toMatch(/"vote":"(34|89)"/);
+    expect(all(a)).toContain('"vote":"3"');
+    expect(all(a)).not.toContain('"vote":"5"');
+    expect(all(b)).toContain('"vote":"5"');
+    expect(all(b)).not.toContain('"vote":"3"');
+    expect(all(c)).not.toMatch(/"vote":"(3|5)"/);
 
     // The assembled frame is exactly what the room's own per-viewer view says.
     const room = app.rooms.get(roomId)!;
@@ -703,7 +731,7 @@ describe('socket hardening', () => {
     a.send({ t: 'reveal' });
     for (const x of [a, b, c]) {
       const r = await x.next('state', (m) => m.room.revealed);
-      expect(r.room.participants.map((p) => p.vote).sort()).toEqual(['34', '89', null]);
+      expect(r.room.participants.map((p) => p.vote).sort()).toEqual(['3', '5', null]);
     }
   });
 });

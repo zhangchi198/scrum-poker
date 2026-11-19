@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { UNDO_WINDOW_MS } from '../shared/protocol.ts';
+import { DECKS, UNDO_WINDOW_MS } from '../shared/protocol.ts';
 import { Room, RoomError, type Guarded } from '../server/room.ts';
 
 const A = 'client-a-000000000000';
@@ -152,7 +152,7 @@ describe('undo', () => {
 
     r.undo(3);
     expect(r.deckId).toBe('fibonacci');
-    expect(r.cards).toContain('13');
+    expect(r.cards).toEqual(DECKS.fibonacci.cards);
     expect(r.participants.get(A)!.vote).toBe('5');
     expect(r.participants.get(B)!.vote).toBe('8');
     expect(r.round).toBe(1);

@@ -53,8 +53,9 @@ export function SettingsDialog({
 
   const validation = deckId === 'custom' ? validateCustomInput(custom) : null;
   const deckError = submitted ? (validation?.error ?? null) : null;
-  const deckChanged =
-    deckId !== room.deckId || (deckId === 'custom' && !!validation && validation.cards.join(',') !== room.cards.join(','));
+  // A room saved before a built-in deck changed keeps its old cards, so picking the same deck again moves it to the current ones.
+  const pickedCards = deckId === 'custom' ? (validation?.cards ?? null) : DECKS[deckId].cards;
+  const deckChanged = deckId !== room.deckId || (!!pickedCards && pickedCards.join(',') !== room.cards.join(','));
 
   function save(e: React.FormEvent) {
     e.preventDefault();

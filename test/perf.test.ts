@@ -237,14 +237,14 @@ describe('room lookup inlined in invite HTML', () => {
     const got = new Promise<void>((ok) => sock.on('message', (d) => JSON.parse(d.toString()).t === 'state' && ok()));
     await new Promise((ok) => sock.once('open', ok));
     sock.send(JSON.stringify({ t: 'join', roomId: id, clientId: 'c'.repeat(20), name: 'Zebediah-Secret', spectator: false }));
-    sock.send(JSON.stringify({ t: 'vote', value: '13' }));
+    sock.send(JSON.stringify({ t: 'vote', value: '8' }));
     await got;
     const html = await (await fetch(`${base}/r/${id}`)).text();
     const data = JSON.parse(tag(html)![1]!) as Record<string, unknown>;
     expect(data).toMatchObject({ status: 'live', players: 1 });
     expect(Object.keys(data).sort()).toEqual(['deckLabel', 'players', 'status', 'story']);
     expect(html).not.toContain('Zebediah');
-    expect(html).not.toContain('"13"');
+    expect(html).not.toContain('"8"');
   });
 
   it('is not inlined for unknown or malformed ids or other paths', async () => {

@@ -7,7 +7,7 @@ Create a room and share the link. Everyone picks a card, and the cards stay hidd
 ## Features
 
 - **Rooms with no accounts.** Each room has an unguessable link. Join by typing a name. A room keeps its full state for 30 days of inactivity, and its link can be revived (same id, same deck, fresh round) for up to 90 days after the last activity. When the first person returns to an empty room that has been idle for 4 hours or more, the round starts clean and offline seats are dropped.
-- **Decks.** Fibonacci, Modified Fibonacci, T-shirt sizes, Powers of 2, or a custom deck. Every built-in deck includes `?` and `☕`.
+- **Decks.** Fibonacci and Modified Fibonacci (both `0 1 2 3 5 8`), T-shirt sizes, Powers of 2, or a custom deck. Every built-in deck includes `?` and `☕`. A room keeps the cards it was created with, so a room saved while the Fibonacci decks still went up to 89 or 100 keeps those cards (and its votes) until someone picks a deck again in Settings.
 - **Hidden votes.** The server never sends anyone else's vote before the reveal. You only see that a person has voted.
 - **Results.** Average, median, agreement %, a distribution chart, and a small celebration on consensus.
 - **Spectator mode** for product owners and observers.
