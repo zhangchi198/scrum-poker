@@ -22,6 +22,14 @@ describe('computeStats', () => {
     expect(s.consensus).toBe(false);
   });
 
+  it('counts ½ as 0.5 on the Modified Fibonacci deck and keeps deck order', () => {
+    const s = computeStats(['13', '½', '1', '½'], DECKS.modified.cards);
+    expect(s.average).toBeCloseTo(15 / 4);
+    expect(s.median).toBe(0.75);
+    expect(s.distribution.map((d) => d.card)).toEqual(['½', '1', '13']);
+    expect(s.mostCommon).toEqual(['½']);
+  });
+
   it('even-length median is the midpoint', () => {
     expect(computeStats(['2', '3', '5', '8'], fib).median).toBe(4);
   });
