@@ -10,11 +10,10 @@ import { DeckPreview } from './DeckPreview.tsx';
 import { FeedbackDialog } from './FeedbackDialog.tsx';
 
 const DECK_CHOICES: { id: DeckId; label: string; preview: string }[] = [
-  ...Object.entries(DECKS).map(([id, d]) => ({
-    id: id as DeckId,
-    label: d.label,
-    preview: d.cards.filter((c) => c !== '?' && c !== '☕').slice(0, 7).join(' · ') + ' …',
-  })),
+  ...Object.entries(DECKS).map(([id, d]) => {
+    const values = d.cards.filter((c) => c !== '?' && c !== '☕');
+    return { id: id as DeckId, label: d.label, preview: values.slice(0, 7).join(' · ') + (values.length > 7 ? ' …' : '') };
+  }),
   { id: 'custom', label: 'Custom', preview: 'Your own values' },
 ];
 
