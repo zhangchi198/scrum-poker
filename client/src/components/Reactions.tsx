@@ -59,11 +59,19 @@ export function Reactions({ onReact }: { onReact: (emoji: string) => void }) {
         toggleRef.current?.focus();
       }
     };
+    // Focus landing on anything outside (Tab, Shift+Tab, wrap-around) closes the picker, like a menu. This listens
+    // for focus arriving rather than for blur: Safari/iOS never focus a pressed button, so a tap on an emoji blurs
+    // to nothing, and closing on that would unmount the grid before the click and lose the pick.
+    const onFocusIn = (e: FocusEvent) => {
+      if (pickerOpen && !wrapRef.current?.contains(e.target as Node)) setPickerOpen(false);
+    };
     document.addEventListener('pointerdown', onDown);
     document.addEventListener('keydown', onKey);
+    document.addEventListener('focusin', onFocusIn);
     return () => {
       document.removeEventListener('pointerdown', onDown);
       document.removeEventListener('keydown', onKey);
+      document.removeEventListener('focusin', onFocusIn);
     };
   }, [open, pickerOpen]);
 
@@ -100,14 +108,7 @@ export function Reactions({ onReact }: { onReact: (emoji: string) => void }) {
   };
 
   return (
-    <div
-      className="reactions-wrap"
-      ref={wrapRef}
-      onBlur={(e) => {
-        // Tabbing out of the picker closes it, like a menu. (preact/compat delivers onBlur as a bubbling focusout.)
-        if (pickerOpen && !wrapRef.current?.contains(e.relatedTarget as Node | null)) setPickerOpen(false);
-      }}
-    >
+    <div className="reactions-wrap" ref={wrapRef}>
       <button
         ref={toggleRef}
         className="reactions-toggle"
