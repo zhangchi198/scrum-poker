@@ -791,6 +791,30 @@ describe('game state and join flow', () => {
     expect(a.raw.join('\n')).not.toContain('rate_limited');
   });
 
+  it('relays any single standard emoji as a reaction, drops anything else, and keeps the reaction cooldown', async () => {
+    const clock = fakeClock();
+    const { base, ws } = await start({ now: clock.now });
+    const roomId = (await createRoom(base)).body.id!;
+    const a = await join(ws, roomId, ID_A, 'Alice');
+    const b = await join(ws, roomId, ID_B, 'Bob');
+    // Text, two emojis, a bare symbol, emoji plus text, oversized strings and non-strings never reach anyone.
+    for (const emoji of ['hello', '👍👍', '©', '🚀 ', '🚀'.repeat(20), 'x'.repeat(3000), '', 42, null]) {
+      b.ws.send(JSON.stringify({ t: 'react', emoji }));
+    }
+    b.send({ t: 'react', emoji: '🦄' }); // from the picker: not a built-in, still fine
+    expect(await a.next('reaction')).toMatchObject({ name: 'Bob', emoji: '🦄' });
+    b.send({ t: 'react', emoji: '🚀' }); // inside the 250 ms cooldown: dropped like a built-in would be
+    b.send({ t: 'ping' });
+    await b.next('pong'); // the server has handled the 🚀 before the clock moves on
+    clock.t += 300;
+    b.send({ t: 'react', emoji: '👨‍👩‍👧' });
+    expect(await a.next('reaction')).toMatchObject({ emoji: '👨‍👩‍👧' });
+    b.send({ t: 'ping' });
+    await b.next('pong');
+    expect(a.raw.filter((r) => r.includes('"t":"reaction"'))).toHaveLength(2);
+    expect(b.raw.join('\n')).not.toContain('"error"');
+  });
+
   it('keeps results unchanged when a voter flips to spectator after the reveal', async () => {
     const { base, ws } = await start();
     const roomId = (await createRoom(base)).body.id!;

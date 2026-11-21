@@ -2,8 +2,9 @@ import { createReadStream, existsSync, readFileSync, renameSync, statSync, write
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { dirname, extname, join, normalize, resolve, sep } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { DECKS, DECK_IDS, REACTIONS, type ClientMsg, type DeckId, type RoomLookup, type ServerMsg } from '../shared/protocol.ts';
+import { DECKS, DECK_IDS, type ClientMsg, type DeckId, type RoomLookup, type ServerMsg } from '../shared/protocol.ts';
 import { FEEDBACK_LIMITS } from '../shared/feedback.ts';
+import { isReactionEmoji } from '../shared/emoji.ts';
 import { createFeedback, mailConfigFromEnv, type MailConfig, type MailTransport } from './feedback.ts';
 import { MAX_BEACON_BYTES } from '../shared/vitals.ts';
 import { createVitals } from './vitals.ts';
@@ -449,7 +450,7 @@ export function createApp(opts: AppOptions = {}) {
         return broadcastState(room);
       case 'react': {
         const now = clock();
-        if (!(REACTIONS as readonly string[]).includes(msg.emoji)) return;
+        if (!isReactionEmoji(msg.emoji)) return; // a built-in reaction or one standard emoji, nothing else
         if (now - c.lastReactionAt < REACTION_COOLDOWN_MS) return;
         c.lastReactionAt = now;
         for (const o of conns) if (o.room === room) send(o.ws, { t: 'reaction', from: me.publicId, name: me.name, emoji: msg.emoji });
